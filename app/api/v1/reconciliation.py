@@ -1,3 +1,4 @@
+import asyncio
 import traceback
 from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status
@@ -83,7 +84,9 @@ async def _run_reconciliation_task(
             CompanyFileMapping.company_id == company_id
         ).first()
         saved_mapping = _model_to_mapping(saved_mapping_model) if saved_mapping_model else None
-        empresa_records, used_mapping = parse_empresa_file(empresa_content, empresa_filename, saved_mapping)
+        empresa_records, used_mapping = await asyncio.to_thread(
+            parse_empresa_file, empresa_content, empresa_filename, saved_mapping
+        )
 
         if not empresa_records:
             warnings = used_mapping.warnings
@@ -99,18 +102,20 @@ async def _run_reconciliation_task(
                 f"{KNOWN_FORMAT_COLUMNS_HELP}."
             )
 
-        token = await get_sunat_token(company_id, creds, company.ruc)
+        async def get_token(force_refresh: bool = False) -> str:
+            return await get_sunat_token(company_id, creds, company.ruc, force_refresh)
 
         if tipo_libro == TipoLibro.compras:
-            sunat_bytes = await descargar_propuesta_compras(token, periodo, company.ruc)
+            sunat_bytes = await descargar_propuesta_compras(get_token, periodo, company.ruc)
         else:
-            sunat_bytes = await descargar_propuesta_ventas(token, periodo, company.ruc)
+            sunat_bytes = await descargar_propuesta_ventas(get_token, periodo, company.ruc)
 
-        sunat_records = parse_sunat_propuesta(sunat_bytes, tipo_libro.value)
+        sunat_records = await asyncio.to_thread(parse_sunat_propuesta, sunat_bytes, tipo_libro.value)
 
-        recon_output = reconcile(empresa_records, sunat_records)
+        recon_output = await asyncio.to_thread(reconcile, empresa_records, sunat_records)
 
-        excel_bytes = generate_excel(
+        excel_bytes = await asyncio.to_thread(
+            generate_excel,
             output=recon_output,
             empresa_nombre=company.nombre_razon_social,
             ruc=company.ruc,
@@ -120,7 +125,7 @@ async def _run_reconciliation_task(
 
         csv_b_bytes = None
         if len(recon_output.scenario_b) > EXCEL_B_LIMIT:
-            csv_b_bytes = generate_csv_b(recon_output)
+            csv_b_bytes = await asyncio.to_thread(generate_csv_b, recon_output)
 
         filename_xlsx = f"{company.ruc}_{periodo}_{tipo_libro.value}.xlsx"
         path_xlsx = f"reportes/{company_id}/{job_id}/{filename_xlsx}"

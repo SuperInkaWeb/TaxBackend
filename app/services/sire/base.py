@@ -134,7 +134,7 @@ def _get_estado(registro: dict) -> str:
 
 
 async def poll_ticket(
-    token: str,
+    get_token,
     ticket_url: str,
     num_ticket: str,
     periodo: str,
@@ -144,16 +144,19 @@ async def poll_ticket(
     Hace polling hasta que el ticket esté Terminado.
     Devuelve TicketFileInfo con nombre de archivo y metadatos de descarga.
     Manual SIRE Ventas 5.16 / Compras 5.31.
-    """
-    headers = _auth_headers(token)
 
+    get_token: async callable (force_refresh: bool) -> str.
+    El polling puede durar 30 min y SUNAT invalida el token si se emite otro
+    para el mismo usuario SOL — ante un 401 se renueva y se reintenta.
+    """
     for _ in range(POLL_MAX_ATTEMPTS):
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        token = await get_token(False)
+        async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.get(
                 ticket_url,
-                headers=headers,
+                headers=_auth_headers(token),
                 params={
                     "perIni":         periodo,
                     "perFin":         periodo,
@@ -164,6 +167,9 @@ async def poll_ticket(
                     "numTicket":      num_ticket,
                 }
             )
+            if resp.status_code == 401:
+                await get_token(True)
+                continue
             resp.raise_for_status()
 
         registros = resp.json().get("registros", [])
@@ -183,7 +189,7 @@ async def poll_ticket(
 
 
 async def download_file(
-    token: str,
+    get_token,
     download_url: str,
     info: TicketFileInfo,
     cod_libro: str,
@@ -193,9 +199,9 @@ async def download_file(
     Descarga el ZIP generado por SUNAT y devuelve los bytes del primer TXT.
     Manual SIRE Ventas 5.17 / Compras 5.32: endpoint archivoreporte.
     Soporta ZIP particionado (.z01, .z02, ..., .zip) — descarga y ensambla todas las partes.
-    """
-    headers = _auth_headers(token)
 
+    get_token: async callable (force_refresh: bool) -> str; renueva ante 401.
+    """
     partes = info.archivo_reportes if info.archivo_reportes else [
         {
             "nomArchivoReporte":   info.nom_archivo,
@@ -220,12 +226,21 @@ async def download_file(
         if info.cod_proceso is not None:
             params["codProceso"] = info.cod_proceso
 
+        token = await get_token(False)
         async with httpx.AsyncClient(timeout=300) as client:
-            resp = await client.get(download_url, headers=headers, params=params)
+            resp = await client.get(download_url, headers=_auth_headers(token), params=params)
+            if resp.status_code == 401:
+                token = await get_token(True)
+                resp = await client.get(download_url, headers=_auth_headers(token), params=params)
             resp.raise_for_status()
 
         partes_bytes.append((nombre, resp.content))
 
+    return await asyncio.to_thread(_extract_txt_from_parts, partes_bytes)
+
+
+def _extract_txt_from_parts(partes_bytes: list[tuple[str, bytes]]) -> bytes:
+    """Extrae el TXT del ZIP (simple o particionado). Corre en hilo aparte."""
     if len(partes_bytes) == 1:
         with zipfile.ZipFile(io.BytesIO(partes_bytes[0][1])) as zf:
             txt_files = [f for f in zf.namelist() if f.lower().endswith(".txt")]

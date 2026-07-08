@@ -14,36 +14,41 @@ ENDPOINTS = {
 async def get_periodos_ventas(token: str) -> list[dict]:
     headers = _auth_headers(token)
     url = ENDPOINTS["anio_mes"].format(cod_libro=COD_LIBRO_VENTAS)
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
     return resp.json()
 
 
-async def descargar_propuesta_ventas(token: str, periodo: str, ruc: str) -> bytes:
+async def descargar_propuesta_ventas(get_token, periodo: str, ruc: str) -> bytes:
     """
     Flujo completo RVIE:
     1. GET exportapropuesta?codTipoArchivo=0 → numTicket
     2. Polling consultaestadotickets → TicketFileInfo
     3. GET archivoreporte → ZIP → TXT bytes
+
+    get_token: async callable (force_refresh: bool) -> str.
     """
-    headers = _auth_headers(token)
     url = ENDPOINTS["exportar_prop"].format(periodo=periodo)
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=headers, params={"codTipoArchivo": "0"})
+    token = await get_token(False)
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.get(url, headers=_auth_headers(token), params={"codTipoArchivo": "0"})
+        if resp.status_code == 401:
+            token = await get_token(True)
+            resp = await client.get(url, headers=_auth_headers(token), params={"codTipoArchivo": "0"})
 
     num_ticket = _extract_ticket(resp, f"ventas periodo {periodo}")
 
     info = await poll_ticket(
-        token,
+        get_token,
         ENDPOINTS["estado_ticket"],
         num_ticket,
         periodo,
         COD_LIBRO_VENTAS,
     )
     return await download_file(
-        token,
+        get_token,
         ENDPOINTS["descargar_arch"],
         info,
         COD_LIBRO_VENTAS,

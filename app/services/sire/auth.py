@@ -9,13 +9,20 @@ SUNAT_TOKEN_URL = "https://api-seguridad.sunat.gob.pe/v1/clientessol/{client_id}
 SCOPE = "https://api-sire.sunat.gob.pe"
 
 
-async def get_sunat_token(company_id: int, creds: CompanyCredentials, ruc: str) -> str:
+async def get_sunat_token(
+    company_id: int,
+    creds: CompanyCredentials,
+    ruc: str,
+    force_refresh: bool = False,
+) -> str:
     """
     Devuelve un token OAuth 2.0 válido para la empresa.
     Usa caché en memoria para no re-autenticar en cada llamada.
+    force_refresh: ignora el caché — usar cuando SUNAT devolvió 401
+    (SUNAT invalida el token anterior al emitir uno nuevo para el mismo usuario SOL).
     """
     cached = _token_cache.get(company_id)
-    if cached and cached["expires_at"] > datetime.now(timezone.utc):
+    if not force_refresh and cached and cached["expires_at"] > datetime.now(timezone.utc):
         return cached["token"]
 
     client_id = creds.client_id
@@ -33,7 +40,7 @@ async def get_sunat_token(company_id: int, creds: CompanyCredentials, ruc: str) 
         "password": clave_sol,
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(url, data=data)
 
     if response.status_code != 200:

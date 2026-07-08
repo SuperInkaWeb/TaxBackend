@@ -14,39 +14,42 @@ ENDPOINTS = {
 async def get_periodos_compras(token: str) -> list[dict]:
     headers = _auth_headers(token)
     url = ENDPOINTS["anio_mes"].format(cod_libro=COD_LIBRO_COMPRAS)
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
     return resp.json()
 
 
-async def descargar_propuesta_compras(token: str, periodo: str, ruc: str) -> bytes:
+async def descargar_propuesta_compras(get_token, periodo: str, ruc: str) -> bytes:
     """
     Flujo completo RCE:
     1. GET exportacioncomprobantepropuesta?codTipoArchivo=0&codOrigenEnvio=2 → numTicket
     2. Polling consultaestadotickets → TicketFileInfo
     3. GET archivoreporte → ZIP → TXT bytes
-    """
-    headers = _auth_headers(token)
-    url = ENDPOINTS["exportar_prop"].format(periodo=periodo)
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            url, headers=headers,
-            params={"codTipoArchivo": "0", "codOrigenEnvio": "2"},
-        )
+    get_token: async callable (force_refresh: bool) -> str.
+    """
+    url = ENDPOINTS["exportar_prop"].format(periodo=periodo)
+    params_exp = {"codTipoArchivo": "0", "codOrigenEnvio": "2"}
+
+    token = await get_token(False)
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.get(url, headers=_auth_headers(token), params=params_exp)
+        if resp.status_code == 401:
+            token = await get_token(True)
+            resp = await client.get(url, headers=_auth_headers(token), params=params_exp)
 
     num_ticket = _extract_ticket(resp, f"compras periodo {periodo}")
 
     info = await poll_ticket(
-        token,
+        get_token,
         ENDPOINTS["estado_ticket"],
         num_ticket,
         periodo,
         COD_LIBRO_COMPRAS,
     )
     return await download_file(
-        token,
+        get_token,
         ENDPOINTS["descargar_arch"],
         info,
         COD_LIBRO_COMPRAS,
