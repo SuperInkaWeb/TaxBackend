@@ -258,6 +258,8 @@ def generate_excel(
         "Base imp. (tu archivo)", "Base imp. (SUNAT)",
         "IGV (tu archivo)", "IGV (SUNAT)",
         "Total (tu archivo)", "Total (SUNAT)",
+        "Exonerado (tu archivo)", "Exonerado (SUNAT)",
+        "Inafecto (tu archivo)", "Inafecto (SUNAT)",
         "Campos con diferencia", "Alerta",
     ])
     use_fmt_c = cnt_c <= EXCEL_FORMAT_LIMIT
@@ -265,17 +267,21 @@ def generate_excel(
     CAMPO_LABELS = {
         "fecha": "Fecha", "base_imponible": "Base imponible",
         "igv": "IGV", "importe_total": "Importe total",
+        "mto_exonerado": "Exonerado", "mto_inafecto": "Inafecto",
     }
     CAMPO_COLS = {
         "fecha":          (4, 5),
         "base_imponible": (6, 7),
         "igv":            (8, 9),
         "importe_total":  (10, 11),
+        "mto_exonerado":  (12, 13),
+        "mto_inafecto":   (14, 15),
     }
+    CAMPO_ORDER = ["fecha", "base_imponible", "igv", "importe_total", "mto_exonerado", "mto_inafecto"]
 
     for row_idx, rec in enumerate(output.scenario_c, 2):
         campos = rec.campos_diferentes
-        campos_txt = ", ".join(CAMPO_LABELS[c] for c in ["fecha", "base_imponible", "igv", "importe_total"] if c in campos)
+        campos_txt = ", ".join(CAMPO_LABELS[c] for c in CAMPO_ORDER if c in campos)
 
         values = [
             rec.tipo_cdp, rec.serie, rec.numero,
@@ -283,6 +289,8 @@ def generate_excel(
             rec.base_imponible_empresa, rec.base_imponible_sunat,
             rec.igv_empresa, rec.igv_sunat,
             rec.importe_total_empresa, rec.importe_total_sunat,
+            rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
+            rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
             campos_txt,
             "ROJO" if rec.es_alerta_roja else "ÁMBAR",
         ]
@@ -295,10 +303,10 @@ def generate_excel(
                 if col_idx in diff_cols:
                     cell.fill = DIFF_FILL
                     cell.font = BOLD
-                elif col_idx == 13:
+                elif col_idx == 17:
                     _alert_style(cell, rec.es_alerta_roja)
                     cell.alignment = Alignment(horizontal="center")
-    _finish_sheet(ws_c, 13, num_cols=[6, 7, 8, 9, 10, 11])
+    _finish_sheet(ws_c, 17, num_cols=[6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
 
     buf = io.BytesIO()
     wb.save(buf)
