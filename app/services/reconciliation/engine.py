@@ -54,7 +54,7 @@ class ScenarioBRecord:
 
 @dataclass
 class ScenarioCRecord:
-    """En ambos, con diferencias en fecha o montos (1 a 4 campos)."""
+    """En ambos, con diferencias en fecha o montos (1 a 6 campos)."""
     tipo_cdp: str
     serie: str
     numero: str
@@ -66,6 +66,10 @@ class ScenarioCRecord:
     igv_sunat: float
     importe_total_empresa: float
     importe_total_sunat: float
+    mto_exonerado_empresa: float
+    mto_exonerado_sunat: float
+    mto_inafecto_empresa: float
+    mto_inafecto_sunat: float
     diferencias: list[DifferenceDetail]
     es_alerta_roja: bool
 
@@ -197,6 +201,24 @@ def reconcile(
                 diferencia    = total_diff,
             ))
 
+        exo_diff = round(emp.mto_exonerado - sun.mto_exonerado, 2)
+        if abs(exo_diff) > 0.01:
+            diffs.append(DifferenceDetail(
+                campo         = "mto_exonerado",
+                valor_empresa = emp.mto_exonerado,
+                valor_sunat   = sun.mto_exonerado,
+                diferencia    = exo_diff,
+            ))
+
+        ina_diff = round(emp.mto_inafecto - sun.mto_inafecto, 2)
+        if abs(ina_diff) > 0.01:
+            diffs.append(DifferenceDetail(
+                campo         = "mto_inafecto",
+                valor_empresa = emp.mto_inafecto,
+                valor_sunat   = sun.mto_inafecto,
+                diferencia    = ina_diff,
+            ))
+
         if diffs:
             es_roja = any(
                 d.campo == "igv" and d.diferencia is not None and abs(d.diferencia) > IGV_DIFF_THRESHOLD
@@ -214,6 +236,10 @@ def reconcile(
                 igv_sunat              = sun.igv,
                 importe_total_empresa  = emp.importe_total,
                 importe_total_sunat    = sun.importe_total,
+                mto_exonerado_empresa  = emp.mto_exonerado,
+                mto_exonerado_sunat    = sun.mto_exonerado,
+                mto_inafecto_empresa   = emp.mto_inafecto,
+                mto_inafecto_sunat     = sun.mto_inafecto,
                 diferencias            = diffs,
                 es_alerta_roja         = es_roja,
             ))
