@@ -37,6 +37,7 @@ class ScenarioARecord:
     igv: float
     importe_total: float
     es_alerta_roja: bool
+    status_description: str = ""
 
 
 @dataclass
@@ -139,6 +140,7 @@ def reconcile(
                 igv           = emp.igv,
                 importe_total = emp.importe_total,
                 es_alerta_roja= es_roja,
+                status_description = emp.status_description,
             ))
 
     scenario_b: list[ScenarioBRecord] = []

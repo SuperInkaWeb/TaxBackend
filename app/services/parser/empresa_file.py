@@ -62,6 +62,7 @@ class EmpresaRecord:
     igv: float = 0.0
     mto_exonerado: float = 0.0
     mto_inafecto: float = 0.0
+    status_description: str = ""
 
     @property
     def key(self) -> tuple:
@@ -339,6 +340,11 @@ def _try_parse_as_known_format(content: bytes) -> list[EmpresaRecord] | None:
     total_arr = _to_float_series(df["amount total"])
     exo_arr   = _to_float_series(df["amount exo"]) if "amount exo" in df.columns else pd.Series(0.0, index=df.index)
     ina_arr   = _to_float_series(df["amount ina"]) if "amount ina" in df.columns else pd.Series(0.0, index=df.index)
+    status_arr = (
+        df["status description"].fillna("").astype(str).str.strip()
+        if "status description" in df.columns
+        else pd.Series("", index=df.index)
+    )
 
     return [
         EmpresaRecord(
@@ -351,11 +357,12 @@ def _try_parse_as_known_format(content: bytes) -> list[EmpresaRecord] | None:
             igv           = tax,
             mto_exonerado = exo,
             mto_inafecto  = ina,
+            status_description = st,
         )
-        for t, s, n, f, net, tax, tot, exo, ina in zip(
+        for t, s, n, f, net, tax, tot, exo, ina, st in zip(
             tipo_arr.tolist(), serie_arr.tolist(), numero_arr.tolist(),
             fecha_arr.tolist(), net_arr.tolist(), tax_arr.tolist(), total_arr.tolist(),
-            exo_arr.tolist(), ina_arr.tolist(),
+            exo_arr.tolist(), ina_arr.tolist(), status_arr.tolist(),
         )
     ]
 
