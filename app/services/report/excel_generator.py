@@ -11,6 +11,8 @@ RED_FILL     = PatternFill("solid", fgColor="FFC7CE")
 RED_FONT     = Font(color="9C0006")
 AMBER_FILL   = PatternFill("solid", fgColor="FFEB9C")
 AMBER_FONT   = Font(color="9C6500")
+GREEN_FILL   = PatternFill("solid", fgColor="C6EFCE")
+GREEN_FONT   = Font(color="006100")
 DIFF_FILL    = PatternFill("solid", fgColor="FFD966")
 HEADER_FILL  = PatternFill("solid", fgColor="1F4E78")
 HEADER_FONT  = Font(color="FFFFFF", bold=True, size=11)
@@ -30,6 +32,7 @@ NUM_FMT = "#,##0.00"
 
 EXCEL_FORMAT_LIMIT = 50_000
 EXCEL_B_LIMIT      = 10_000
+EXCEL_D_LIMIT      = 10_000
 
 
 def _set_header_row(ws, headers: list[str], row: int = 1):
@@ -85,6 +88,7 @@ def generate_excel(
     cnt_a = len(output.scenario_a)
     cnt_b = len(output.scenario_b)
     cnt_c = len(output.scenario_c)
+    cnt_d = len(output.scenario_d)
 
     ws = wb.active
     ws.title = "Resumen"
@@ -119,18 +123,29 @@ def generate_excel(
     ws.cell(row=r, column=2, value="RESULTADOS").font = SECTION_FONT
     r += 1
     resultados = [
-        ("A — En tu archivo, no en SUNAT",          cnt_a, "Comprobantes que declaraste pero SUNAT no tiene registrados en todo el mes"),
-        ("B — En SUNAT, no en tu archivo",          cnt_b, "Comprobantes que SUNAT tiene en las fechas de tu archivo y tú no enviaste"),
-        ("C — En ambos, con diferencias",           cnt_c, "Comprobantes encontrados en ambos pero con fecha o montos distintos"),
+        ("A — En tu archivo, no en SUNAT",          cnt_a, "Comprobantes que declaraste pero SUNAT no tiene registrados en todo el mes", False),
+        ("B — En SUNAT, no en tu archivo",          cnt_b, "Comprobantes que SUNAT tiene en las fechas de tu archivo y tú no enviaste", False),
+        ("C — En ambos, con diferencias",           cnt_c, "Comprobantes encontrados en ambos pero con fecha o montos distintos", False),
+        ("D — Coinciden sin diferencias",           cnt_d, "Comprobantes validados: idénticos en tu archivo y en SUNAT", True),
     ]
-    for label, count, desc in resultados:
+    for label, count, desc, es_bueno in resultados:
         ws.cell(row=r, column=2, value=label).font = BOLD
         cell_cnt = ws.cell(row=r, column=3, value=count)
         cell_cnt.font = Font(bold=True, size=12)
         cell_cnt.alignment = Alignment(horizontal="center")
         if count > 0:
-            cell_cnt.fill = AMBER_FILL
+            cell_cnt.fill = GREEN_FILL if es_bueno else AMBER_FILL
         ws.cell(row=r, column=4, value=desc).font = NOTE_FONT
+        r += 1
+
+    total_comparados = cnt_a + cnt_c + cnt_d
+    if total_comparados:
+        ws.cell(row=r, column=2, value="Tasa de conciliación").font = BOLD
+        cell_tasa = ws.cell(row=r, column=3, value=cnt_d / total_comparados)
+        cell_tasa.number_format = "0.00%"
+        cell_tasa.font = Font(bold=True, size=12, color="006100")
+        cell_tasa.alignment = Alignment(horizontal="center")
+        ws.cell(row=r, column=4, value="Porcentaje de tus comprobantes que coinciden exactamente con SUNAT").font = NOTE_FONT
         r += 1
 
     r += 1
@@ -190,6 +205,11 @@ def generate_excel(
         notas.append((
             f"La pestaña B muestra {EXCEL_B_LIMIT:,} de {cnt_b:,} registros",
             "Ordenados por IGV descendente. El listado completo está en el CSV descargable.",
+        ))
+    if cnt_d > EXCEL_D_LIMIT:
+        notas.append((
+            f"La pestaña D muestra un resumen por tipo ({cnt_d:,} comprobantes OK)",
+            "El detalle completo está en el CSV del Escenario D descargable.",
         ))
 
     if notas:
@@ -311,6 +331,57 @@ def generate_excel(
                     cell.alignment = Alignment(horizontal="center")
     _finish_sheet(ws_c, 17, num_cols=[6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
 
+    ws_d = wb.create_sheet("D - Coinciden OK")
+    if cnt_d <= EXCEL_D_LIMIT:
+        _set_header_row(ws_d, [
+            "Tipo", "Serie", "Número", "Fecha emisión",
+            "Base imponible", "IGV", "Importe total",
+        ])
+        use_fmt_d = cnt_d <= EXCEL_FORMAT_LIMIT
+        for row_idx, rec in enumerate(output.scenario_d, 2):
+            values = [
+                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
+                rec.base_imponible, rec.igv, rec.importe_total,
+            ]
+            for col_idx, val in enumerate(values, 1):
+                cell = ws_d.cell(row=row_idx, column=col_idx, value=val)
+                if use_fmt_d:
+                    cell.border = THIN_BORDER
+        _finish_sheet(ws_d, 7, num_cols=[5, 6, 7])
+    else:
+        d_por_tipo: dict[str, tuple[int, float]] = {}
+        for rec in output.scenario_d:
+            cant, monto = d_por_tipo.get(rec.tipo_cdp, (0, 0.0))
+            d_por_tipo[rec.tipo_cdp] = (cant + 1, monto + rec.importe_total)
+
+        _set_header_row(ws_d, ["Tipo", "Descripción", "Cantidad", "Importe total"])
+        row_idx = 2
+        for tipo, (cant, monto) in sorted(d_por_tipo.items(), key=lambda x: -x[1][0]):
+            ws_d.cell(row=row_idx, column=1, value=tipo).border = THIN_BORDER
+            ws_d.cell(row=row_idx, column=2, value=TIPO_LABELS.get(tipo, tipo)).border = THIN_BORDER
+            c_cant = ws_d.cell(row=row_idx, column=3, value=cant)
+            c_cant.border = THIN_BORDER
+            c_cant.number_format = "#,##0"
+            c_monto = ws_d.cell(row=row_idx, column=4, value=round(monto, 2))
+            c_monto.border = THIN_BORDER
+            c_monto.number_format = NUM_FMT
+            row_idx += 1
+
+        ws_d.cell(row=row_idx, column=2, value="TOTAL").font = BOLD
+        c_tot = ws_d.cell(row=row_idx, column=3, value=cnt_d)
+        c_tot.font = BOLD
+        c_tot.number_format = "#,##0"
+        c_monto_tot = ws_d.cell(row=row_idx, column=4, value=round(sum(m for _, m in d_por_tipo.values()), 2))
+        c_monto_tot.font = BOLD
+        c_monto_tot.number_format = NUM_FMT
+        row_idx += 2
+        ws_d.cell(
+            row=row_idx, column=1,
+            value=f"Los {cnt_d:,} comprobantes coinciden exactamente con SUNAT. El detalle completo está en el CSV del Escenario D.",
+        ).font = NOTE_FONT
+        for col_idx, width in {1: 8, 2: 24, 3: 14, 4: 18}.items():
+            ws_d.column_dimensions[get_column_letter(col_idx)].width = width
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -329,5 +400,21 @@ def generate_csv_b(output: ReconciliationOutput) -> bytes:
             rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
             rec.base_imponible_sunat, rec.igv_sunat, rec.importe_total_sunat,
             "ROJO" if rec.es_alerta_roja else "AMBAR",
+        ])
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def generate_csv_d(output: ReconciliationOutput) -> bytes:
+    """CSV completo del Escenario D — solo se genera cuando D supera EXCEL_D_LIMIT."""
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "Tipo CDP", "Serie", "Numero", "Fecha Emision",
+        "Base Imponible", "IGV", "Importe Total",
+    ])
+    for rec in output.scenario_d:
+        w.writerow([
+            rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
+            rec.base_imponible, rec.igv, rec.importe_total,
         ])
     return buf.getvalue().encode("utf-8-sig")
