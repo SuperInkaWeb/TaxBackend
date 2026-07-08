@@ -14,6 +14,8 @@ class SunatRecord:
     igv: float
     importe_total: float
     tipo_cambio: float
+    mto_exonerado: float = 0.0
+    mto_inafecto: float = 0.0
 
     @property
     def key(self) -> tuple:
@@ -32,6 +34,8 @@ VENTAS_COL_IDX: dict[str, int] = {
     "descuento_base_imponible":15,
     "igv":                     16,
     "descuento_igv":           17,
+    "mto_exonerado":           18,
+    "mto_inafecto":            19,
     "importe_total":           25,
     "tipo_cambio":             27,
 }
@@ -112,6 +116,13 @@ def parse_sunat_propuesta(txt_bytes: bytes, tipo_libro: str) -> list[SunatRecord
     if "descuento_igv" in col_idx:
         igv_s = igv_s + _to_float(_col(df, col_idx["descuento_igv"]))
 
+    if "mto_exonerado" in col_idx:
+        exo_s = _to_float(_col(df, col_idx["mto_exonerado"]))
+        ina_s = _to_float(_col(df, col_idx["mto_inafecto"]))
+    else:
+        exo_s = pd.Series(0.0, index=df.index)
+        ina_s = pd.Series(0.0, index=df.index)
+
     parts = fecha_s.str.extract(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
     is_slash = parts[0].notna()
     fecha_norm = (parts[2] + "-" + parts[1].str.zfill(2) + "-" + parts[0].str.zfill(2)).where(is_slash, fecha_s)
@@ -126,10 +137,13 @@ def parse_sunat_propuesta(txt_bytes: bytes, tipo_libro: str) -> list[SunatRecord
             igv            = g,
             importe_total  = m,
             tipo_cambio    = tc,
+            mto_exonerado  = exo,
+            mto_inafecto   = ina,
         )
-        for t, s, n, f, b, g, m, tc in zip(
+        for t, s, n, f, b, g, m, tc, exo, ina in zip(
             tipo_cdp_s.tolist(), serie_s.tolist(), numero_s.tolist(), fecha_norm.tolist(),
             base_s.tolist(), igv_s.tolist(), importe_s.tolist(), tc_s.tolist(),
+            exo_s.tolist(), ina_s.tolist(),
         )
     ]
 
