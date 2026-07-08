@@ -46,6 +46,7 @@ class ReconciliationResult(Base):
     escenario_a_count: Mapped[int] = mapped_column(Integer, default=0)
     escenario_b_count: Mapped[int] = mapped_column(Integer, default=0)
     escenario_c_count: Mapped[int] = mapped_column(Integer, default=0)
+    escenario_d_count: Mapped[int] = mapped_column(Integer, default=0)
     igv_diferencia_total: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
     tiene_alertas_rojas: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -62,6 +63,8 @@ class ReportFile(Base):
     file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     csv_b_storage_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     csv_b_file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    csv_d_storage_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    csv_d_file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     job: Mapped["ReconciliationJob"] = relationship("ReconciliationJob", back_populates="report_file")

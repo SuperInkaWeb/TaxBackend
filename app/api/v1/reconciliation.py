@@ -20,7 +20,7 @@ from app.services.parser.empresa_file import parse_empresa_file, KNOWN_FORMAT_CO
 from app.services.parser.sunat_propuesta import parse_sunat_propuesta
 from app.api.v1.file_mapping import _model_to_mapping
 from app.services.reconciliation.engine import reconcile
-from app.services.report.excel_generator import generate_excel, generate_csv_b, EXCEL_B_LIMIT
+from app.services.report.excel_generator import generate_excel, generate_csv_b, generate_csv_d, EXCEL_B_LIMIT, EXCEL_D_LIMIT
 from app.storage import storage
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
@@ -55,6 +55,10 @@ def _build_response(job: ReconciliationJob) -> ReconciliationJobResponse:
     resp.has_csv_b = (
         job.report_file is not None
         and job.report_file.csv_b_storage_path is not None
+    )
+    resp.has_csv_d = (
+        job.report_file is not None
+        and job.report_file.csv_d_storage_path is not None
     )
     return resp
 
@@ -127,6 +131,10 @@ async def _run_reconciliation_task(
         if len(recon_output.scenario_b) > EXCEL_B_LIMIT:
             csv_b_bytes = await asyncio.to_thread(generate_csv_b, recon_output)
 
+        csv_d_bytes = None
+        if len(recon_output.scenario_d) > EXCEL_D_LIMIT:
+            csv_d_bytes = await asyncio.to_thread(generate_csv_d, recon_output)
+
         filename_xlsx = f"{company.ruc}_{periodo}_{tipo_libro.value}.xlsx"
         path_xlsx = f"reportes/{company_id}/{job_id}/{filename_xlsx}"
         storage.save(path_xlsx, excel_bytes)
@@ -137,11 +145,18 @@ async def _run_reconciliation_task(
             path_csv = f"reportes/{company_id}/{job_id}/{filename_csv}"
             storage.save(path_csv, csv_b_bytes)
 
+        path_csv_d = None
+        if csv_d_bytes is not None:
+            filename_csv_d = f"{company.ruc}_{periodo}_{tipo_libro.value}_D.csv"
+            path_csv_d = f"reportes/{company_id}/{job_id}/{filename_csv_d}"
+            storage.save(path_csv_d, csv_d_bytes)
+
         result = ReconciliationResult(
             job_id=job_id,
             escenario_a_count=len(recon_output.scenario_a),
             escenario_b_count=len(recon_output.scenario_b),
             escenario_c_count=len(recon_output.scenario_c),
+            escenario_d_count=len(recon_output.scenario_d),
             igv_diferencia_total=recon_output.igv_diferencia_total,
             tiene_alertas_rojas=recon_output.tiene_alertas_rojas,
         )
@@ -154,6 +169,8 @@ async def _run_reconciliation_task(
             file_size_bytes=len(excel_bytes),
             csv_b_storage_path=path_csv,
             csv_b_file_size_bytes=len(csv_b_bytes) if csv_b_bytes is not None else None,
+            csv_d_storage_path=path_csv_d,
+            csv_d_file_size_bytes=len(csv_d_bytes) if csv_d_bytes is not None else None,
         )
         db.add(report)
 
@@ -295,6 +312,28 @@ def download_csv_b(
 
     filename = job.report_file.csv_b_storage_path.split("/")[-1]
     content = storage.read(job.report_file.csv_b_storage_path)
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{job_id}/download-csv-d")
+def download_csv_d(
+    job_id: int,
+    current_user: User = Depends(require_any_role),
+    db: Session = Depends(get_db),
+):
+    """Descarga el CSV completo del Escenario D (comprobantes que coinciden OK)."""
+    job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
+    if not job or not job.report_file or not job.report_file.csv_d_storage_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CSV Escenario D no disponible")
+
+    _check_job_access(job, current_user)
+
+    filename = job.report_file.csv_d_storage_path.split("/")[-1]
+    content = storage.read(job.report_file.csv_d_storage_path)
     return Response(
         content=content,
         media_type="text/csv; charset=utf-8",

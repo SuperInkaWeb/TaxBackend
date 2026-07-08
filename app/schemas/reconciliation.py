@@ -24,6 +24,7 @@ class ReconciliationResultResponse(BaseModel):
     escenario_a_count: int
     escenario_b_count: int
     escenario_c_count: int
+    escenario_d_count: int = 0
     igv_diferencia_total: float
     tiene_alertas_rojas: bool
 
@@ -42,3 +43,4 @@ class ReconciliationJobResponse(BaseModel):
     result: ReconciliationResultResponse | None = None
     has_report: bool = False
     has_csv_b: bool = False
+    has_csv_d: bool = False
