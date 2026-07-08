@@ -79,11 +79,24 @@ class ScenarioCRecord:
         return {d.campo for d in self.diferencias}
 
 
+@dataclass(slots=True)
+class ScenarioDRecord:
+    """En ambos, sin ninguna diferencia (los 6 campos idénticos)."""
+    tipo_cdp: str
+    serie: str
+    numero: str
+    fecha_emision: str
+    base_imponible: float
+    igv: float
+    importe_total: float
+
+
 @dataclass
 class ReconciliationOutput:
     scenario_a: list[ScenarioARecord]
     scenario_b: list[ScenarioBRecord]
     scenario_c: list[ScenarioCRecord]
+    scenario_d: list[ScenarioDRecord] = field(default_factory=list)
     excluidos_por_tipo: dict[str, int] = field(default_factory=dict)
     csv_duplicados: int = 0
     sunat_duplicados: int = 0
@@ -162,6 +175,7 @@ def reconcile(
         ))
 
     scenario_c: list[ScenarioCRecord] = []
+    scenario_d: list[ScenarioDRecord] = []
     for key in empresa_index.keys() & sunat_index.keys():
         emp = empresa_index[key]
         sun = sunat_index[key]
@@ -245,11 +259,22 @@ def reconcile(
                 diferencias            = diffs,
                 es_alerta_roja         = es_roja,
             ))
+        else:
+            scenario_d.append(ScenarioDRecord(
+                tipo_cdp      = emp.tipo_cdp,
+                serie         = emp.serie,
+                numero        = emp.numero,
+                fecha_emision = emp.fecha_emision,
+                base_imponible= emp.base_imponible,
+                igv           = emp.igv,
+                importe_total = emp.importe_total,
+            ))
 
     return ReconciliationOutput(
         scenario_a=scenario_a,
         scenario_b=scenario_b,
         scenario_c=scenario_c,
+        scenario_d=scenario_d,
         excluidos_por_tipo=dict(excluidos),
         csv_duplicados=csv_duplicados,
         sunat_duplicados=sunat_duplicados,
