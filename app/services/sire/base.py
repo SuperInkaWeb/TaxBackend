@@ -133,6 +133,56 @@ def _get_estado(registro: dict) -> str:
     )
 
 
+async def consultar_ticket(
+    get_token,
+    ticket_url: str,
+    num_ticket: str,
+    periodo: str,
+    cod_libro: str,
+) -> tuple[str, TicketFileInfo] | None:
+    """
+    Consulta ÚNICA del estado de un ticket (sin polling).
+    Devuelve (estado, TicketFileInfo) o None si SUNAT ya no conoce el ticket.
+    """
+    token = await get_token(False)
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.get(
+            ticket_url,
+            headers=_auth_headers(token),
+            params={
+                "perIni":         periodo,
+                "perFin":         periodo,
+                "page":           1,
+                "perPage":        20,
+                "codLibro":       cod_libro,
+                "codOrigenEnvio": "2",
+                "numTicket":      num_ticket,
+            }
+        )
+        if resp.status_code == 401:
+            token = await get_token(True)
+            resp = await client.get(
+                ticket_url,
+                headers=_auth_headers(token),
+                params={
+                    "perIni":         periodo,
+                    "perFin":         periodo,
+                    "page":           1,
+                    "perPage":        20,
+                    "codLibro":       cod_libro,
+                    "codOrigenEnvio": "2",
+                    "numTicket":      num_ticket,
+                }
+            )
+        resp.raise_for_status()
+
+    registros = resp.json().get("registros", [])
+    if not registros:
+        return None
+    registro = registros[0]
+    return _get_estado(registro), _extract_file_info(registro, periodo)
+
+
 async def poll_ticket(
     get_token,
     ticket_url: str,

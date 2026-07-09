@@ -1,5 +1,8 @@
 import httpx
-from app.services.sire.base import SIRE_BASE, _auth_headers, poll_ticket, download_file, _extract_ticket
+from app.services.sire.base import (
+    SIRE_BASE, TicketFileInfo, _auth_headers, poll_ticket, download_file,
+    _extract_ticket, consultar_ticket,
+)
 
 COD_LIBRO_VENTAS = "140000"
 
@@ -20,14 +23,10 @@ async def get_periodos_ventas(token: str) -> list[dict]:
     return resp.json()
 
 
-async def descargar_propuesta_ventas(get_token, periodo: str, ruc: str) -> bytes:
+async def solicitar_export_ventas(get_token, periodo: str) -> str:
     """
-    Flujo completo RVIE:
-    1. GET exportapropuesta?codTipoArchivo=0 → numTicket
-    2. Polling consultaestadotickets → TicketFileInfo
-    3. GET archivoreporte → ZIP → TXT bytes
-
-    get_token: async callable (force_refresh: bool) -> str.
+    Fase 1 RVIE: GET exportapropuesta?codTipoArchivo=0 → numTicket.
+    Si ya hay un proceso en curso (42209), reutiliza ese ticket.
     """
     url = ENDPOINTS["exportar_prop"].format(periodo=periodo)
 
@@ -38,8 +37,20 @@ async def descargar_propuesta_ventas(get_token, periodo: str, ruc: str) -> bytes
             token = await get_token(True)
             resp = await client.get(url, headers=_auth_headers(token), params={"codTipoArchivo": "0"})
 
-    num_ticket = _extract_ticket(resp, f"ventas periodo {periodo}")
+    return _extract_ticket(resp, f"ventas periodo {periodo}")
 
+
+async def consultar_ticket_ventas(get_token, num_ticket: str, periodo: str) -> tuple[str, TicketFileInfo] | None:
+    """Consulta única del estado de un ticket de ventas. None si SUNAT ya no lo conoce."""
+    return await consultar_ticket(
+        get_token, ENDPOINTS["estado_ticket"], num_ticket, periodo, COD_LIBRO_VENTAS,
+    )
+
+
+async def descargar_ticket_ventas(get_token, num_ticket: str, periodo: str) -> bytes:
+    """
+    Fases 2-3 RVIE: polling del ticket hasta Terminado + descarga del ZIP → TXT bytes.
+    """
     info = await poll_ticket(
         get_token,
         ENDPOINTS["estado_ticket"],
@@ -54,3 +65,13 @@ async def descargar_propuesta_ventas(get_token, periodo: str, ruc: str) -> bytes
         COD_LIBRO_VENTAS,
         num_ticket,
     )
+
+
+async def descargar_propuesta_ventas(get_token, periodo: str, ruc: str) -> bytes:
+    """
+    Flujo completo RVIE (fase 1 + fases 2-3).
+
+    get_token: async callable (force_refresh: bool) -> str.
+    """
+    num_ticket = await solicitar_export_ventas(get_token, periodo)
+    return await descargar_ticket_ventas(get_token, num_ticket, periodo)
