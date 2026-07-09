@@ -74,6 +74,27 @@ def _build_response(job: ReconciliationJob) -> ReconciliationJobResponse:
 TICKET_FRESCURA_HORAS = 24
 
 
+def _buscar_ticket_fresco(
+    db: Session,
+    company_id: int,
+    periodo: str,
+    tipo_libro: TipoLibro,
+    exclude_job_id: int | None = None,
+) -> ReconciliationJob | None:
+    """Último job de la empresa con ticket del mismo periodo/libro y < 24h de antigüedad."""
+    limite = datetime.now(timezone.utc) - timedelta(hours=TICKET_FRESCURA_HORAS)
+    query = db.query(ReconciliationJob).filter(
+        ReconciliationJob.company_id == company_id,
+        ReconciliationJob.periodo == periodo,
+        ReconciliationJob.tipo_libro == tipo_libro,
+        ReconciliationJob.num_ticket.isnot(None),
+        ReconciliationJob.created_at > limite,
+    )
+    if exclude_job_id is not None:
+        query = query.filter(ReconciliationJob.id != exclude_job_id)
+    return query.order_by(ReconciliationJob.id.desc()).first()
+
+
 async def _run_reconciliation_task(
     job_id: int,
     empresa_content: bytes,
@@ -82,6 +103,7 @@ async def _run_reconciliation_task(
     periodo: str,
     tipo_libro: TipoLibro,
     resume: bool = False,
+    reuse: bool = False,
 ) -> None:
     """
     Tarea de fondo que ejecuta la conciliación completa.
@@ -89,6 +111,8 @@ async def _run_reconciliation_task(
 
     resume=True: intenta retomar el ticket SUNAT guardado en el job
     (si sigue vivo y es fresco) en vez de generar uno nuevo.
+    reuse=True: el usuario eligió reutilizar la propuesta fresca de otro
+    job del mismo periodo/libro (Terminado y < 24h).
     """
     db = SessionLocal()
     try:
@@ -144,9 +168,20 @@ async def _run_reconciliation_task(
                     if "error" not in estado:
                         num_ticket = job.num_ticket
 
+        if num_ticket is None and reuse:
+            candidato = _buscar_ticket_fresco(db, company_id, periodo, tipo_libro, exclude_job_id=job_id)
+            if candidato is not None:
+                consulta = await consultar(get_token, candidato.num_ticket, periodo)
+                if consulta is not None and "terminado" in consulta[0].lower():
+                    num_ticket = candidato.num_ticket
+                    job.num_ticket = num_ticket
+                    job.propuesta_origen_at = candidato.propuesta_origen_at or candidato.created_at
+                    db.commit()
+
         if num_ticket is None:
             num_ticket = await solicitar(get_token, periodo)
             job.num_ticket = num_ticket
+            job.propuesta_origen_at = datetime.now(timezone.utc)
             db.commit()
 
         sunat_bytes = await descargar(get_token, num_ticket, periodo)
@@ -162,6 +197,7 @@ async def _run_reconciliation_task(
             ruc=company.ruc,
             periodo=periodo,
             tipo_libro=tipo_libro.value,
+            propuesta_generada=job.propuesta_origen_at,
         )
 
         csv_b_bytes = None
@@ -243,6 +279,7 @@ async def run_reconciliation(
     periodo: str = Form(..., description="Periodo en formato AAAAMM, ej. 202601"),
     tipo_libro: TipoLibro = Form(...),
     archivo: UploadFile = File(..., description="Archivo TXT o CSV de la empresa"),
+    reutilizar_propuesta: bool = Form(False, description="Reutilizar propuesta SUNAT fresca si existe"),
     current_user: User = Depends(require_any_role),
     db: Session = Depends(get_db),
 ):
@@ -288,6 +325,8 @@ async def run_reconciliation(
         company.id,
         periodo,
         tipo_libro,
+        False,
+        reutilizar_propuesta,
     )
 
     return _build_response(job)
@@ -364,6 +403,51 @@ def list_jobs(
 
     jobs = query.order_by(ReconciliationJob.created_at.desc()).all()
     return [_build_response(job) for job in jobs]
+
+
+@router.get("/propuesta-disponible")
+async def propuesta_disponible(
+    periodo: str,
+    tipo_libro: TipoLibro,
+    current_user: User = Depends(require_any_role),
+    db: Session = Depends(get_db),
+):
+    """
+    Indica si existe una propuesta SUNAT fresca (< 24h, Terminada) del mismo
+    periodo/libro que puede reutilizarse en vez de solicitar una nueva.
+    """
+    no_disponible = {"disponible": False, "generado_a": None}
+
+    if not current_user.company_id:
+        return no_disponible
+
+    candidato = _buscar_ticket_fresco(db, current_user.company_id, periodo, tipo_libro)
+    if candidato is None:
+        return no_disponible
+
+    company = db.query(Company).filter(Company.id == current_user.company_id).first()
+    creds = db.query(CompanyCredentials).filter(
+        CompanyCredentials.company_id == current_user.company_id
+    ).first()
+    if not company or not creds:
+        return no_disponible
+
+    async def get_token(force_refresh: bool = False) -> str:
+        return await get_sunat_token(current_user.company_id, creds, company.ruc, force_refresh)
+
+    consultar = consultar_ticket_compras if tipo_libro == TipoLibro.compras else consultar_ticket_ventas
+    try:
+        consulta = await consultar(get_token, candidato.num_ticket, periodo)
+    except Exception:
+        return no_disponible
+
+    if consulta is None or "terminado" not in consulta[0].lower():
+        return no_disponible
+
+    return {
+        "disponible": True,
+        "generado_a": candidato.propuesta_origen_at or candidato.created_at,
+    }
 
 
 @router.get("/{job_id}", response_model=ReconciliationJobResponse)

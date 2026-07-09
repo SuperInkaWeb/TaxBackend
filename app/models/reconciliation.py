@@ -29,6 +29,7 @@ class ReconciliationJob(Base):
     empresa_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     empresa_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     num_ticket: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    propuesta_origen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

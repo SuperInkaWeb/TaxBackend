@@ -40,6 +40,7 @@ class ReconciliationJobResponse(BaseModel):
     error_message: str | None
     created_at: datetime
     completed_at: datetime | None
+    propuesta_origen_at: datetime | None = None
     result: ReconciliationResultResponse | None = None
     has_report: bool = False
     has_csv_b: bool = False
