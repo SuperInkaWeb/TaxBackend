@@ -4,7 +4,7 @@ __pycache__/
 *.pyo
 .env
 .env.local
-storage/
+/storage/
 scripts/output/
 *.xlsx
 *.zip

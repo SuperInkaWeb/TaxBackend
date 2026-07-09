@@ -27,6 +27,8 @@ class ReconciliationJob(Base):
     tipo_libro: Mapped[TipoLibro] = mapped_column(Enum(TipoLibro), nullable=False)
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.en_cola, nullable=False)
     empresa_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    empresa_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    num_ticket: Mapped[str | None] = mapped_column(String(30), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
