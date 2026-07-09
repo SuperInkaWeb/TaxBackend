@@ -29,7 +29,7 @@ def _find_7zip() -> str | None:
 
 SIRE_BASE = "https://api-sire.sunat.gob.pe/v1/contribuyente/migeigv/libros"
 POLL_INTERVAL_SECONDS = 10
-POLL_MAX_ATTEMPTS = 180
+POLL_MAX_ATTEMPTS = 360
 
 
 class TicketStatus(str, Enum):
