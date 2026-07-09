@@ -30,9 +30,10 @@ THIN_BORDER = Border(
 
 NUM_FMT = "#,##0.00"
 
-EXCEL_FORMAT_LIMIT = 50_000
-EXCEL_B_LIMIT      = 10_000
-EXCEL_D_LIMIT      = 10_000
+EXCEL_FORMAT_LIMIT  = 50_000
+EXCEL_B_LIMIT       = 10_000
+EXCEL_D_LIMIT       = 10_000
+EXCEL_MAX_DATA_ROWS = 1_048_575
 
 
 def _set_header_row(ws, headers: list[str], row: int = 1):
@@ -82,6 +83,7 @@ def generate_excel(
     ruc: str,
     periodo: str,
     tipo_libro: str,
+    propuesta_generada: datetime | None = None,
 ) -> bytes:
     wb = Workbook()
 
@@ -112,8 +114,10 @@ def generate_excel(
         ("RUC",           ruc),
         ("Periodo",       f"{periodo[:4]}/{periodo[4:]}"),
         ("Tipo de libro", "Ventas (RVIE)" if tipo_libro == "ventas" else "Compras (RCE)"),
-        ("Generado",      datetime.now().strftime("%d/%m/%Y %H:%M")),
     ]
+    if propuesta_generada is not None:
+        datos.append(("Propuesta SUNAT", f"generada el {propuesta_generada.astimezone().strftime('%d/%m/%Y %H:%M')}"))
+    datos.append(("Generado", datetime.now().strftime("%d/%m/%Y %H:%M")))
     for label, value in datos:
         ws.cell(row=r, column=2, value=label).font = BOLD
         ws.cell(row=r, column=3, value=value)
@@ -206,10 +210,15 @@ def generate_excel(
             f"La pestaña B muestra {EXCEL_B_LIMIT:,} de {cnt_b:,} registros",
             "Ordenados por IGV descendente. El listado completo está en el CSV descargable.",
         ))
-    if cnt_d > EXCEL_D_LIMIT:
+    if cnt_d > EXCEL_MAX_DATA_ROWS:
         notas.append((
-            f"La pestaña D muestra un resumen por tipo ({cnt_d:,} comprobantes OK)",
-            "El detalle completo está en el CSV del Escenario D descargable.",
+            f"La pestaña D muestra {EXCEL_MAX_DATA_ROWS:,} de {cnt_d:,} registros",
+            "Excel no admite más filas por hoja. El listado completo está en el CSV del Escenario D.",
+        ))
+    elif cnt_d > EXCEL_D_LIMIT:
+        notas.append((
+            f"La pestaña D contiene el detalle completo ({cnt_d:,} comprobantes OK)",
+            "El mismo listado está disponible como CSV del Escenario D para análisis externo.",
         ))
 
     if notas:
@@ -332,55 +341,32 @@ def generate_excel(
     _finish_sheet(ws_c, 17, num_cols=[6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
 
     ws_d = wb.create_sheet("D - Coinciden OK")
-    if cnt_d <= EXCEL_D_LIMIT:
-        _set_header_row(ws_d, [
-            "Tipo", "Serie", "Número", "Fecha emisión",
-            "Base imponible", "IGV", "Importe total",
-        ])
-        use_fmt_d = cnt_d <= EXCEL_FORMAT_LIMIT
-        for row_idx, rec in enumerate(output.scenario_d, 2):
-            values = [
-                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
-                rec.base_imponible, rec.igv, rec.importe_total,
-            ]
-            for col_idx, val in enumerate(values, 1):
-                cell = ws_d.cell(row=row_idx, column=col_idx, value=val)
-                if use_fmt_d:
-                    cell.border = THIN_BORDER
-        _finish_sheet(ws_d, 7, num_cols=[5, 6, 7])
-    else:
-        d_por_tipo: dict[str, tuple[int, float]] = {}
-        for rec in output.scenario_d:
-            cant, monto = d_por_tipo.get(rec.tipo_cdp, (0, 0.0))
-            d_por_tipo[rec.tipo_cdp] = (cant + 1, monto + rec.importe_total)
-
-        _set_header_row(ws_d, ["Tipo", "Descripción", "Cantidad", "Importe total"])
-        row_idx = 2
-        for tipo, (cant, monto) in sorted(d_por_tipo.items(), key=lambda x: -x[1][0]):
-            ws_d.cell(row=row_idx, column=1, value=tipo).border = THIN_BORDER
-            ws_d.cell(row=row_idx, column=2, value=TIPO_LABELS.get(tipo, tipo)).border = THIN_BORDER
-            c_cant = ws_d.cell(row=row_idx, column=3, value=cant)
-            c_cant.border = THIN_BORDER
-            c_cant.number_format = "#,##0"
-            c_monto = ws_d.cell(row=row_idx, column=4, value=round(monto, 2))
-            c_monto.border = THIN_BORDER
-            c_monto.number_format = NUM_FMT
-            row_idx += 1
-
-        ws_d.cell(row=row_idx, column=2, value="TOTAL").font = BOLD
-        c_tot = ws_d.cell(row=row_idx, column=3, value=cnt_d)
-        c_tot.font = BOLD
-        c_tot.number_format = "#,##0"
-        c_monto_tot = ws_d.cell(row=row_idx, column=4, value=round(sum(m for _, m in d_por_tipo.values()), 2))
-        c_monto_tot.font = BOLD
-        c_monto_tot.number_format = NUM_FMT
-        row_idx += 2
-        ws_d.cell(
-            row=row_idx, column=1,
-            value=f"Los {cnt_d:,} comprobantes coinciden exactamente con SUNAT. El detalle completo está en el CSV del Escenario D.",
-        ).font = NOTE_FONT
-        for col_idx, width in {1: 8, 2: 24, 3: 14, 4: 18}.items():
-            ws_d.column_dimensions[get_column_letter(col_idx)].width = width
+    _set_header_row(ws_d, [
+        "Tipo", "Serie", "Número",
+        "Fecha (tu archivo)", "Fecha (SUNAT)",
+        "Base imp. (tu archivo)", "Base imp. (SUNAT)",
+        "IGV (tu archivo)", "IGV (SUNAT)",
+        "Total (tu archivo)", "Total (SUNAT)",
+        "Exonerado (tu archivo)", "Exonerado (SUNAT)",
+        "Inafecto (tu archivo)", "Inafecto (SUNAT)",
+    ])
+    use_fmt_d = cnt_d <= EXCEL_FORMAT_LIMIT
+    recs_d = output.scenario_d[:EXCEL_MAX_DATA_ROWS]
+    for row_idx, rec in enumerate(recs_d, 2):
+        values = [
+            rec.tipo_cdp, rec.serie, rec.numero,
+            rec.fecha_emision_empresa, rec.fecha_emision_sunat,
+            rec.base_imponible_empresa, rec.base_imponible_sunat,
+            rec.igv_empresa, rec.igv_sunat,
+            rec.importe_total_empresa, rec.importe_total_sunat,
+            rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
+            rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
+        ]
+        for col_idx, val in enumerate(values, 1):
+            cell = ws_d.cell(row=row_idx, column=col_idx, value=val)
+            if use_fmt_d:
+                cell.border = THIN_BORDER
+    _finish_sheet(ws_d, 15, num_cols=[6, 7, 8, 9, 10, 11, 12, 13, 14, 15] if use_fmt_d else None)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -409,12 +395,22 @@ def generate_csv_d(output: ReconciliationOutput) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow([
-        "Tipo CDP", "Serie", "Numero", "Fecha Emision",
-        "Base Imponible", "IGV", "Importe Total",
+        "Tipo CDP", "Serie", "Numero",
+        "Fecha (Empresa)", "Fecha (SUNAT)",
+        "Base Imponible (Empresa)", "Base Imponible (SUNAT)",
+        "IGV (Empresa)", "IGV (SUNAT)",
+        "Importe Total (Empresa)", "Importe Total (SUNAT)",
+        "Exonerado (Empresa)", "Exonerado (SUNAT)",
+        "Inafecto (Empresa)", "Inafecto (SUNAT)",
     ])
     for rec in output.scenario_d:
         w.writerow([
-            rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
-            rec.base_imponible, rec.igv, rec.importe_total,
+            rec.tipo_cdp, rec.serie, rec.numero,
+            rec.fecha_emision_empresa, rec.fecha_emision_sunat,
+            rec.base_imponible_empresa, rec.base_imponible_sunat,
+            rec.igv_empresa, rec.igv_sunat,
+            rec.importe_total_empresa, rec.importe_total_sunat,
+            rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
+            rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
         ])
     return buf.getvalue().encode("utf-8-sig")

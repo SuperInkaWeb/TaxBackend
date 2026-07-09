@@ -81,14 +81,22 @@ class ScenarioCRecord:
 
 @dataclass(slots=True)
 class ScenarioDRecord:
-    """En ambos, sin ninguna diferencia (los 6 campos idénticos)."""
+    """En ambos, sin diferencias relevantes (los 6 campos coinciden con tolerancia de S/ 0.01)."""
     tipo_cdp: str
     serie: str
     numero: str
-    fecha_emision: str
-    base_imponible: float
-    igv: float
-    importe_total: float
+    fecha_emision_empresa: str
+    fecha_emision_sunat: str
+    base_imponible_empresa: float
+    base_imponible_sunat: float
+    igv_empresa: float
+    igv_sunat: float
+    importe_total_empresa: float
+    importe_total_sunat: float
+    mto_exonerado_empresa: float
+    mto_exonerado_sunat: float
+    mto_inafecto_empresa: float
+    mto_inafecto_sunat: float
 
 
 @dataclass
@@ -261,13 +269,21 @@ def reconcile(
             ))
         else:
             scenario_d.append(ScenarioDRecord(
-                tipo_cdp      = emp.tipo_cdp,
-                serie         = emp.serie,
-                numero        = emp.numero,
-                fecha_emision = emp.fecha_emision,
-                base_imponible= emp.base_imponible,
-                igv           = emp.igv,
-                importe_total = emp.importe_total,
+                tipo_cdp               = emp.tipo_cdp,
+                serie                  = emp.serie,
+                numero                 = emp.numero,
+                fecha_emision_empresa  = emp.fecha_emision,
+                fecha_emision_sunat    = sun.fecha_emision,
+                base_imponible_empresa = emp.base_imponible,
+                base_imponible_sunat   = sun.base_imponible,
+                igv_empresa            = emp.igv,
+                igv_sunat              = sun.igv,
+                importe_total_empresa  = emp.importe_total,
+                importe_total_sunat    = sun.importe_total,
+                mto_exonerado_empresa  = emp.mto_exonerado,
+                mto_exonerado_sunat    = sun.mto_exonerado,
+                mto_inafecto_empresa   = emp.mto_inafecto,
+                mto_inafecto_sunat     = sun.mto_inafecto,
             ))
 
     return ReconciliationOutput(
