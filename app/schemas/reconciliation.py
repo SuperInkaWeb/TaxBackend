@@ -44,3 +44,4 @@ class ReconciliationJobResponse(BaseModel):
     has_report: bool = False
     has_csv_b: bool = False
     has_csv_d: bool = False
+    can_resume: bool = False

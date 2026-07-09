@@ -1,6 +1,6 @@
 import asyncio
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.responses import Response
 from pydantic import ValidationError
@@ -13,8 +13,12 @@ from app.models.credentials import CompanyCredentials
 from app.models.reconciliation import ReconciliationJob, ReconciliationResult, ReportFile, TipoLibro, JobStatus
 from app.schemas.reconciliation import ReconciliationCreate, ReconciliationJobResponse
 from app.services.sire.auth import get_sunat_token
-from app.services.sire.compras import descargar_propuesta_compras
-from app.services.sire.ventas import descargar_propuesta_ventas
+from app.services.sire.compras import (
+    solicitar_export_compras, consultar_ticket_compras, descargar_ticket_compras,
+)
+from app.services.sire.ventas import (
+    solicitar_export_ventas, consultar_ticket_ventas, descargar_ticket_ventas,
+)
 from app.models.file_mapping import CompanyFileMapping
 from app.services.parser.empresa_file import parse_empresa_file, KNOWN_FORMAT_COLUMNS_HELP
 from app.services.parser.sunat_propuesta import parse_sunat_propuesta
@@ -60,7 +64,14 @@ def _build_response(job: ReconciliationJob) -> ReconciliationJobResponse:
         job.report_file is not None
         and job.report_file.csv_d_storage_path is not None
     )
+    resp.can_resume = (
+        job.status == JobStatus.error
+        and job.empresa_file_path is not None
+    )
     return resp
+
+
+TICKET_FRESCURA_HORAS = 24
 
 
 async def _run_reconciliation_task(
@@ -70,10 +81,14 @@ async def _run_reconciliation_task(
     company_id: int,
     periodo: str,
     tipo_libro: TipoLibro,
+    resume: bool = False,
 ) -> None:
     """
     Tarea de fondo que ejecuta la conciliación completa.
     Abre su propia sesión de DB (la del request ya cerró).
+
+    resume=True: intenta retomar el ticket SUNAT guardado en el job
+    (si sigue vivo y es fresco) en vez de generar uno nuevo.
     """
     db = SessionLocal()
     try:
@@ -110,9 +125,31 @@ async def _run_reconciliation_task(
             return await get_sunat_token(company_id, creds, company.ruc, force_refresh)
 
         if tipo_libro == TipoLibro.compras:
-            sunat_bytes = await descargar_propuesta_compras(get_token, periodo, company.ruc)
+            solicitar, consultar, descargar = (
+                solicitar_export_compras, consultar_ticket_compras, descargar_ticket_compras,
+            )
         else:
-            sunat_bytes = await descargar_propuesta_ventas(get_token, periodo, company.ruc)
+            solicitar, consultar, descargar = (
+                solicitar_export_ventas, consultar_ticket_ventas, descargar_ticket_ventas,
+            )
+
+        num_ticket = None
+        if resume and job.num_ticket:
+            created = job.created_at if job.created_at.tzinfo else job.created_at.replace(tzinfo=timezone.utc)
+            es_fresco = datetime.now(timezone.utc) - created < timedelta(hours=TICKET_FRESCURA_HORAS)
+            if es_fresco:
+                consulta = await consultar(get_token, job.num_ticket, periodo)
+                if consulta is not None:
+                    estado = consulta[0].lower()
+                    if "error" not in estado:
+                        num_ticket = job.num_ticket
+
+        if num_ticket is None:
+            num_ticket = await solicitar(get_token, periodo)
+            job.num_ticket = num_ticket
+            db.commit()
+
+        sunat_bytes = await descargar(get_token, num_ticket, periodo)
 
         sunat_records = await asyncio.to_thread(parse_sunat_propuesta, sunat_bytes, tipo_libro.value)
 
@@ -174,6 +211,13 @@ async def _run_reconciliation_task(
         )
         db.add(report)
 
+        if job.empresa_file_path:
+            try:
+                storage.delete(job.empresa_file_path)
+            except Exception:
+                pass
+            job.empresa_file_path = None
+
         job.status = JobStatus.completado
         job.completed_at = datetime.now(timezone.utc)
         db.commit()
@@ -231,6 +275,11 @@ async def run_reconciliation(
     db.commit()
     db.refresh(job)
 
+    upload_path = f"uploads/{company.id}/{job.id}/{archivo.filename or 'empresa.csv'}"
+    storage.save(upload_path, empresa_content)
+    job.empresa_file_path = upload_path
+    db.commit()
+
     background_tasks.add_task(
         _run_reconciliation_task,
         job.id,
@@ -239,6 +288,60 @@ async def run_reconciliation(
         company.id,
         periodo,
         tipo_libro,
+    )
+
+    return _build_response(job)
+
+
+@router.post("/{job_id}/resume", response_model=ReconciliationJobResponse)
+async def resume_reconciliation(
+    job_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(require_any_role),
+    db: Session = Depends(get_db),
+):
+    """
+    Reanuda un job fallido: si el ticket SUNAT guardado sigue vivo lo retoma
+    (descarga directa si ya está Terminado); si murió, genera uno nuevo.
+    """
+    job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job no encontrado")
+
+    _check_job_access(job, current_user)
+
+    if job.status != JobStatus.error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Solo se pueden reanudar conciliaciones en estado de error",
+        )
+    if not job.empresa_file_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Este job no es reanudable (no se conservó el archivo de la empresa)",
+        )
+
+    try:
+        empresa_content = storage.read(job.empresa_file_path)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El archivo de la empresa ya no está disponible. Crea una conciliación nueva.",
+        )
+
+    job.status = JobStatus.en_cola
+    job.error_message = None
+    db.commit()
+
+    background_tasks.add_task(
+        _run_reconciliation_task,
+        job.id,
+        empresa_content,
+        job.empresa_filename or "",
+        job.company_id,
+        job.periodo,
+        job.tipo_libro,
+        True,
     )
 
     return _build_response(job)
