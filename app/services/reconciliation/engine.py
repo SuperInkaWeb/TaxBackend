@@ -7,14 +7,18 @@ from app.services.parser.sunat_propuesta import SunatRecord
 IGV_DIFF_THRESHOLD = 0.10
 
 TIPOS_CONCILIABLES = {"01", "03", "07", "08"}
+TIPOS_CONCILIABLES_COMPRAS = {"01", "07", "08", "30", "50", "54"}
 
 TIPO_LABELS = {
     "01": "Factura",
     "03": "Boleta",
+    "05": "Boleto de transporte aéreo",
     "07": "Nota de Crédito",
     "08": "Nota de Débito",
     "09": "Guía de Remisión",
     "04": "Liquidación de Compra",
+    "14": "Recibo de servicios públicos",
+    "50": "DUA - Importación",
 }
 
 
@@ -38,6 +42,8 @@ class ScenarioARecord:
     importe_total: float
     es_alerta_roja: bool
     status_description: str = ""
+    ruc_proveedor: str = ""
+    razon_social: str = ""
 
 
 @dataclass
@@ -51,6 +57,8 @@ class ScenarioBRecord:
     igv_sunat: float
     importe_total_sunat: float
     es_alerta_roja: bool
+    ruc_proveedor: str = ""
+    razon_social: str = ""
 
 
 @dataclass
@@ -73,6 +81,22 @@ class ScenarioCRecord:
     mto_inafecto_sunat: float
     diferencias: list[DifferenceDetail]
     es_alerta_roja: bool
+    ruc_proveedor: str = ""
+    razon_social: str = ""
+    bi_dgng_empresa: float = 0.0
+    bi_dgng_sunat: float = 0.0
+    igv_dgng_empresa: float = 0.0
+    igv_dgng_sunat: float = 0.0
+    bi_dng_empresa: float = 0.0
+    bi_dng_sunat: float = 0.0
+    igv_dng_empresa: float = 0.0
+    igv_dng_sunat: float = 0.0
+    valor_adq_ng_empresa: float = 0.0
+    valor_adq_ng_sunat: float = 0.0
+    moneda_empresa: str = ""
+    moneda_sunat: str = ""
+    tipo_cambio_empresa: float = 0.0
+    tipo_cambio_sunat: float = 0.0
 
     @property
     def campos_diferentes(self) -> set[str]:
@@ -116,9 +140,10 @@ class ReconciliationOutput:
     @property
     def igv_diferencia_total(self) -> float:
         total = 0.0
+        campos_igv = {"igv", "igv_dgng", "igv_dng"}
         for rec in self.scenario_c:
             for diff in rec.diferencias:
-                if diff.campo == "igv" and diff.diferencia is not None:
+                if diff.campo in campos_igv and diff.diferencia is not None:
                     total += abs(diff.diferencia)
         for rec in self.scenario_b:
             total += abs(rec.igv_sunat)
@@ -136,9 +161,13 @@ class ReconciliationOutput:
 def reconcile(
     empresa_records: list[EmpresaRecord],
     sunat_records: list[SunatRecord],
+    tipo_libro: str = "ventas",
 ) -> ReconciliationOutput:
-    conciliables = [r for r in empresa_records if r.key[0] in TIPOS_CONCILIABLES]
-    excluidos = Counter(r.key[0] for r in empresa_records if r.key[0] not in TIPOS_CONCILIABLES)
+    es_compras = tipo_libro == "compras"
+    tipos_ok = TIPOS_CONCILIABLES_COMPRAS if es_compras else TIPOS_CONCILIABLES
+
+    conciliables = [r for r in empresa_records if r.key[1] in tipos_ok]
+    excluidos = Counter(r.key[1] for r in empresa_records if r.key[1] not in tipos_ok)
 
     empresa_index = {r.key: r for r in conciliables}
     sunat_index   = {r.key: r for r in sunat_records}
@@ -146,22 +175,30 @@ def reconcile(
     csv_duplicados   = len(conciliables) - len(empresa_index)
     sunat_duplicados = len(sunat_records) - len(sunat_index)
 
-    csv_dates: set[str] = {r.fecha_emision for r in conciliables if r.fecha_emision}
+    # En ventas el CSV es un corte por fechas del mes → B se filtra a esas fechas.
+    # En compras el PLE es el registro íntegro del periodo (con fechas de emisión
+    # dispersas por meses) → B compara periodo completo, sin filtro.
+    csv_dates: set[str] = (
+        set() if es_compras else {r.fecha_emision for r in conciliables if r.fecha_emision}
+    )
 
     scenario_a: list[ScenarioARecord] = []
     for key, emp in empresa_index.items():
         if key not in sunat_index:
-            es_roja = abs(emp.igv) > IGV_DIFF_THRESHOLD
+            igv_total = emp.igv + emp.igv_dgng + emp.igv_dng
+            es_roja = abs(igv_total) > IGV_DIFF_THRESHOLD
             scenario_a.append(ScenarioARecord(
                 tipo_cdp      = emp.tipo_cdp,
                 serie         = emp.serie,
                 numero        = emp.numero,
                 fecha_emision = emp.fecha_emision,
                 base_imponible= emp.base_imponible,
-                igv           = emp.igv,
+                igv           = igv_total,
                 importe_total = emp.importe_total,
                 es_alerta_roja= es_roja,
                 status_description = emp.status_description,
+                ruc_proveedor = emp.ruc_proveedor,
+                razon_social  = emp.razon_social,
             ))
 
     scenario_b: list[ScenarioBRecord] = []
@@ -170,82 +207,59 @@ def reconcile(
             continue
         if csv_dates and sun.fecha_emision not in csv_dates:
             continue
-        es_roja = abs(sun.igv) > IGV_DIFF_THRESHOLD
+        igv_total = sun.igv + sun.igv_dgng + sun.igv_dng
+        es_roja = abs(igv_total) > IGV_DIFF_THRESHOLD
         scenario_b.append(ScenarioBRecord(
             tipo_cdp            = sun.tipo_cdp,
             serie               = sun.serie,
             numero              = sun.numero,
             fecha_emision       = sun.fecha_emision,
             base_imponible_sunat= sun.base_imponible,
-            igv_sunat           = sun.igv,
+            igv_sunat           = igv_total,
             importe_total_sunat = sun.importe_total,
             es_alerta_roja      = es_roja,
+            ruc_proveedor       = sun.ruc_proveedor,
+            razon_social        = sun.razon_social,
         ))
 
     scenario_c: list[ScenarioCRecord] = []
     scenario_d: list[ScenarioDRecord] = []
+    campos_igv = {"igv", "igv_dgng", "igv_dng"}
+
     for key in empresa_index.keys() & sunat_index.keys():
         emp = empresa_index[key]
         sun = sunat_index[key]
 
         diffs: list[DifferenceDetail] = []
 
+        def _cmp_num(campo: str, v_emp: float, v_sun: float, tol: float = 0.01, nd: int = 2):
+            d = round(v_emp - v_sun, nd)
+            if abs(d) > tol:
+                diffs.append(DifferenceDetail(campo, v_emp, v_sun, d))
+
         if emp.fecha_emision and sun.fecha_emision and emp.fecha_emision != sun.fecha_emision:
-            diffs.append(DifferenceDetail(
-                campo         = "fecha",
-                valor_empresa = emp.fecha_emision,
-                valor_sunat   = sun.fecha_emision,
-                diferencia    = None,
-            ))
+            diffs.append(DifferenceDetail("fecha", emp.fecha_emision, sun.fecha_emision, None))
 
-        net_diff = round(emp.base_imponible - sun.base_imponible, 2)
-        if abs(net_diff) > 0.01:
-            diffs.append(DifferenceDetail(
-                campo         = "base_imponible",
-                valor_empresa = emp.base_imponible,
-                valor_sunat   = sun.base_imponible,
-                diferencia    = net_diff,
-            ))
+        _cmp_num("base_imponible", emp.base_imponible, sun.base_imponible)
+        _cmp_num("igv", emp.igv, sun.igv)
+        _cmp_num("importe_total", emp.importe_total, sun.importe_total)
 
-        tax_diff = round(emp.igv - sun.igv, 2)
-        if abs(tax_diff) > 0.01:
-            diffs.append(DifferenceDetail(
-                campo         = "igv",
-                valor_empresa = emp.igv,
-                valor_sunat   = sun.igv,
-                diferencia    = tax_diff,
-            ))
-
-        total_diff = round(emp.importe_total - sun.importe_total, 2)
-        if abs(total_diff) > 0.01:
-            diffs.append(DifferenceDetail(
-                campo         = "importe_total",
-                valor_empresa = emp.importe_total,
-                valor_sunat   = sun.importe_total,
-                diferencia    = total_diff,
-            ))
-
-        exo_diff = round(emp.mto_exonerado - sun.mto_exonerado, 2)
-        if abs(exo_diff) > 0.01:
-            diffs.append(DifferenceDetail(
-                campo         = "mto_exonerado",
-                valor_empresa = emp.mto_exonerado,
-                valor_sunat   = sun.mto_exonerado,
-                diferencia    = exo_diff,
-            ))
-
-        ina_diff = round(emp.mto_inafecto - sun.mto_inafecto, 2)
-        if abs(ina_diff) > 0.01:
-            diffs.append(DifferenceDetail(
-                campo         = "mto_inafecto",
-                valor_empresa = emp.mto_inafecto,
-                valor_sunat   = sun.mto_inafecto,
-                diferencia    = ina_diff,
-            ))
+        if es_compras:
+            _cmp_num("bi_dgng", emp.bi_dgng, sun.bi_dgng)
+            _cmp_num("igv_dgng", emp.igv_dgng, sun.igv_dgng)
+            _cmp_num("bi_dng", emp.bi_dng, sun.bi_dng)
+            _cmp_num("igv_dng", emp.igv_dng, sun.igv_dng)
+            _cmp_num("valor_adq_ng", emp.valor_adq_ng, sun.valor_adq_ng)
+            if emp.moneda and sun.moneda and emp.moneda.strip().upper() != sun.moneda.strip().upper():
+                diffs.append(DifferenceDetail("moneda", emp.moneda, sun.moneda, None))
+            _cmp_num("tipo_cambio", emp.tipo_cambio, sun.tipo_cambio, tol=0.001, nd=3)
+        else:
+            _cmp_num("mto_exonerado", emp.mto_exonerado, sun.mto_exonerado)
+            _cmp_num("mto_inafecto", emp.mto_inafecto, sun.mto_inafecto)
 
         if diffs:
             es_roja = any(
-                d.campo == "igv" and d.diferencia is not None and abs(d.diferencia) > IGV_DIFF_THRESHOLD
+                d.campo in campos_igv and d.diferencia is not None and abs(d.diferencia) > IGV_DIFF_THRESHOLD
                 for d in diffs
             )
             scenario_c.append(ScenarioCRecord(
@@ -266,6 +280,22 @@ def reconcile(
                 mto_inafecto_sunat     = sun.mto_inafecto,
                 diferencias            = diffs,
                 es_alerta_roja         = es_roja,
+                ruc_proveedor          = emp.ruc_proveedor,
+                razon_social           = emp.razon_social or sun.razon_social,
+                bi_dgng_empresa        = emp.bi_dgng,
+                bi_dgng_sunat          = sun.bi_dgng,
+                igv_dgng_empresa       = emp.igv_dgng,
+                igv_dgng_sunat         = sun.igv_dgng,
+                bi_dng_empresa         = emp.bi_dng,
+                bi_dng_sunat           = sun.bi_dng,
+                igv_dng_empresa        = emp.igv_dng,
+                igv_dng_sunat          = sun.igv_dng,
+                valor_adq_ng_empresa   = emp.valor_adq_ng,
+                valor_adq_ng_sunat     = sun.valor_adq_ng,
+                moneda_empresa         = emp.moneda,
+                moneda_sunat           = sun.moneda,
+                tipo_cambio_empresa    = emp.tipo_cambio,
+                tipo_cambio_sunat      = sun.tipo_cambio,
             ))
         else:
             scenario_d.append(ScenarioDRecord(

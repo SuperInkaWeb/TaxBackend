@@ -191,7 +191,7 @@ async def _run_reconciliation_task(
 
         sunat_records = await asyncio.to_thread(parse_sunat_propuesta, sunat_bytes, tipo_libro.value)
 
-        recon_output = await asyncio.to_thread(reconcile, empresa_records, sunat_records)
+        recon_output = await asyncio.to_thread(reconcile, empresa_records, sunat_records, tipo_libro.value)
 
         excel_bytes = await asyncio.to_thread(
             generate_excel,
