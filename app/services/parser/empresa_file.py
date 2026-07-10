@@ -63,13 +63,23 @@ class EmpresaRecord:
     mto_exonerado: float = 0.0
     mto_inafecto: float = 0.0
     status_description: str = ""
+    ruc_proveedor: str = ""
+    razon_social: str = ""
+    bi_dgng: float = 0.0
+    igv_dgng: float = 0.0
+    bi_dng: float = 0.0
+    igv_dng: float = 0.0
+    valor_adq_ng: float = 0.0
+    moneda: str = ""
+    tipo_cambio: float = 1.0
 
     @property
     def key(self) -> tuple:
+        r = str(self.ruc_proveedor).strip()
         t = str(self.tipo_cdp).strip().upper()
         s = str(self.serie).strip().upper()
         n = str(self.numero).strip().lstrip("0") or "0"
-        return (t, s, n)
+        return (r, t, s, n)
 
 
 _TIPO_CDP_PATTERN = re.compile(r"^(0[0-9]|[1-9][0-9]|[A-Z]{2})$")
@@ -367,6 +377,133 @@ def _try_parse_as_known_format(content: bytes) -> list[EmpresaRecord] | None:
     ]
 
 
+_PLE81_IDX = {
+    "fecha": 3, "tipo": 5, "serie": 6, "numero": 8,
+    "ruc": 11, "razon": 12,
+    "bi_dg": 13, "igv_dg": 14, "bi_dgng": 15, "igv_dgng": 16,
+    "bi_dng": 17, "igv_dng": 18, "valor_adq_ng": 19,
+    "isc": 20, "icbper": 21, "otros": 22,
+    "total": 23, "moneda": 24, "tipo_cambio": 25,
+}
+
+_PLE_PERIODO_RE = re.compile(r"^\d{6}00$")
+_PLE_FECHA_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
+
+PLE81_FORMAT_HELP = (
+    "TXT del Registro de Compras electrónico (PLE 8.1): campos separados por '|', "
+    "sin encabezados, con el periodo (AAAAMM00) como primer campo"
+)
+
+
+def es_ple_compras(content: bytes) -> bool:
+    """Detección rápida por firma estructural del PLE 8.1 (solo la primera línea)."""
+    try:
+        head = content[:2000].decode(_detect_encoding(content[:2000]), errors="replace")
+    except Exception:
+        return False
+    first = next((l for l in head.splitlines() if l.strip()), "")
+    parts = first.split("|")
+    return (
+        len(parts) >= 26
+        and bool(_PLE_PERIODO_RE.match(parts[0].strip()))
+        and bool(_PLE_FECHA_RE.match(parts[3].strip()))
+    )
+
+
+def _try_parse_as_ple_compras(content: bytes) -> list[EmpresaRecord] | None:
+    """
+    Parsea el Registro de Compras electrónico PLE 8.1 (formato normado por SUNAT,
+    sin encabezados, mapeo posicional). Incluye chequeo aritmético: si
+    total ≠ suma de componentes en la muestra, las posiciones no son las del
+    estándar y se rechaza (return None) en vez de conciliar datos corridos.
+    """
+    if not es_ple_compras(content):
+        return None
+
+    encoding = _detect_encoding(content)
+    text = content.decode(encoding, errors="replace")
+
+    try:
+        df = pd.read_csv(
+            io.StringIO(text),
+            sep="|",
+            header=None,
+            dtype=str,
+            skip_blank_lines=True,
+            on_bad_lines="skip",
+        )
+    except Exception:
+        return None
+
+    if df.empty or len(df.columns) < 26:
+        return None
+
+    def col_s(i: int) -> pd.Series:
+        return df.iloc[:, i].fillna("").astype(str).str.strip()
+
+    def col_n(i: int) -> pd.Series:
+        return pd.to_numeric(
+            col_s(i).str.replace(",", "", regex=False), errors="coerce"
+        ).fillna(0.0)
+
+    total_s = col_n(_PLE81_IDX["total"])
+    suma_s = sum(
+        col_n(_PLE81_IDX[c])
+        for c in ("bi_dg", "igv_dg", "bi_dgng", "igv_dgng", "bi_dng", "igv_dng",
+                  "valor_adq_ng", "isc", "icbper", "otros")
+    )
+    muestra = min(len(df), 2000)
+    cuadran = ((suma_s.iloc[:muestra] - total_s.iloc[:muestra]).abs() <= 0.02).mean()
+    if cuadran < 0.9:
+        return None
+
+    valid = ~col_s(_PLE81_IDX["numero"]).eq("")
+    df = df[valid].reset_index(drop=True)
+    if df.empty:
+        return []
+
+    fecha_arr = _norm_date_series(col_s(_PLE81_IDX["fecha"]))
+
+    return [
+        EmpresaRecord(
+            tipo_cdp      = t,
+            serie         = s,
+            numero        = n,
+            importe_total = tot,
+            fecha_emision = f,
+            base_imponible= bdg,
+            igv           = idg,
+            ruc_proveedor = ruc,
+            razon_social  = razon,
+            bi_dgng       = bdgng,
+            igv_dgng      = idgng,
+            bi_dng        = bdng,
+            igv_dng       = idng,
+            valor_adq_ng  = ang,
+            moneda        = mon,
+            tipo_cambio   = tc if tc else 1.0,
+        )
+        for t, s, n, f, ruc, razon, bdg, idg, bdgng, idgng, bdng, idng, ang, tot, mon, tc in zip(
+            col_s(_PLE81_IDX["tipo"]).tolist(),
+            col_s(_PLE81_IDX["serie"]).tolist(),
+            col_s(_PLE81_IDX["numero"]).tolist(),
+            fecha_arr.tolist(),
+            col_s(_PLE81_IDX["ruc"]).tolist(),
+            col_s(_PLE81_IDX["razon"]).tolist(),
+            col_n(_PLE81_IDX["bi_dg"]).tolist(),
+            col_n(_PLE81_IDX["igv_dg"]).tolist(),
+            col_n(_PLE81_IDX["bi_dgng"]).tolist(),
+            col_n(_PLE81_IDX["igv_dgng"]).tolist(),
+            col_n(_PLE81_IDX["bi_dng"]).tolist(),
+            col_n(_PLE81_IDX["igv_dng"]).tolist(),
+            col_n(_PLE81_IDX["valor_adq_ng"]).tolist(),
+            col_n(_PLE81_IDX["total"]).tolist(),
+            col_s(_PLE81_IDX["moneda"]).tolist(),
+            col_n(_PLE81_IDX["tipo_cambio"]).tolist(),
+        )
+    ]
+
+
 def detect_mapping(content: bytes, filename: str = "") -> ColumnMapping:
     """
     Analiza el archivo e intenta detectar su estructura automáticamente.
@@ -495,21 +632,48 @@ def parse_empresa_file(
     content: bytes,
     filename: str = "",
     saved_mapping: ColumnMapping | None = None,
+    tipo_libro: str = "ventas",
 ) -> tuple[list[EmpresaRecord], ColumnMapping]:
     """
-    Punto de entrada principal.
-    - Primero intenta detectar el formato conocido (CSV con headers estándar).
-    - Si hay un saved_mapping confirmado → lo usa directamente.
-    - Si no → detecta automáticamente.
-    Devuelve (registros, mapping_usado). Solo mapping.known_format=True garantiza
-    que los registros tienen fecha_emision/base_imponible/igv.
+    Punto de entrada principal. Los formatos aceptados dependen del libro:
+    - ventas:  CSV con headers estándar (formato conocido)
+    - compras: TXT PLE 8.1 (Registro de Compras electrónico, posicional)
+    Detecta y avisa el caso cruzado (archivo de un libro subido al otro).
+    Devuelve (registros, mapping_usado). Solo mapping.known_format=True habilita
+    la conciliación.
     """
+    if tipo_libro == "compras":
+        ple_records = _try_parse_as_ple_compras(content)
+        if ple_records is not None:
+            return ple_records, ColumnMapping(
+                confidence=0.99, has_header=False, confirmed_by_user=True, known_format=True,
+            )
+        rechazo = ColumnMapping(known_format=False)
+        if _try_parse_as_known_format(content) is not None:
+            rechazo.warnings.append(
+                "El archivo tiene el formato del sistema de VENTAS — elegiste el libro de COMPRAS. "
+                "Para compras se espera el TXT PLE 8.1."
+            )
+        elif es_ple_compras(content):
+            rechazo.warnings.append(
+                "El archivo parece un PLE 8.1 pero sus montos no cuadran con el estándar "
+                "(total ≠ suma de componentes) — posible estructura corrida o versión no soportada."
+            )
+        return [], rechazo
+
     known_records = _try_parse_as_known_format(content)
     if known_records is not None:
         known_mapping = ColumnMapping(
             confidence=0.99, has_header=True, confirmed_by_user=True, known_format=True,
         )
         return known_records, known_mapping
+
+    if es_ple_compras(content):
+        rechazo = ColumnMapping(known_format=False)
+        rechazo.warnings.append(
+            "El archivo parece un Registro de COMPRAS (PLE 8.1) — elegiste el libro de VENTAS."
+        )
+        return [], rechazo
 
     if saved_mapping and saved_mapping.confirmed_by_user and saved_mapping.is_usable:
         return parse_with_mapping(content, saved_mapping), saved_mapping

@@ -16,13 +16,22 @@ class SunatRecord:
     tipo_cambio: float
     mto_exonerado: float = 0.0
     mto_inafecto: float = 0.0
+    ruc_proveedor: str = ""
+    razon_social: str = ""
+    bi_dgng: float = 0.0
+    igv_dgng: float = 0.0
+    bi_dng: float = 0.0
+    igv_dng: float = 0.0
+    valor_adq_ng: float = 0.0
+    moneda: str = ""
 
     @property
     def key(self) -> tuple:
+        r = str(self.ruc_proveedor).strip()
         t = str(self.tipo_cdp).strip().upper()
         s = str(self.serie).strip().upper()
         n = str(self.numero).strip().lstrip("0") or "0"
-        return (t, s, n)
+        return (r, t, s, n)
 
 
 VENTAS_COL_IDX: dict[str, int] = {
@@ -45,9 +54,17 @@ COMPRAS_COL_IDX: dict[str, int] = {
     "tipo_cdp":       6,
     "serie":          7,
     "numero":         9,
+    "ruc_proveedor":  12,
+    "razon_social":   13,
     "base_imponible": 14,
     "igv":            15,
+    "bi_dgng":        16,
+    "igv_dgng":       17,
+    "bi_dng":         18,
+    "igv_dng":        19,
+    "valor_adq_ng":   20,
     "importe_total":  24,
+    "moneda":         25,
     "tipo_cambio":    26,
 }
 
@@ -123,6 +140,21 @@ def parse_sunat_propuesta(txt_bytes: bytes, tipo_libro: str) -> list[SunatRecord
         exo_s = pd.Series(0.0, index=df.index)
         ina_s = pd.Series(0.0, index=df.index)
 
+    def _opt_str(campo: str) -> pd.Series:
+        return _col(df, col_idx[campo]) if campo in col_idx else pd.Series("", index=df.index)
+
+    def _opt_num(campo: str) -> pd.Series:
+        return _to_float(_col(df, col_idx[campo])) if campo in col_idx else pd.Series(0.0, index=df.index)
+
+    ruc_s     = _opt_str("ruc_proveedor")
+    razon_s   = _opt_str("razon_social")
+    moneda_s  = _opt_str("moneda")
+    dgng_b_s  = _opt_num("bi_dgng")
+    dgng_i_s  = _opt_num("igv_dgng")
+    dng_b_s   = _opt_num("bi_dng")
+    dng_i_s   = _opt_num("igv_dng")
+    ang_s     = _opt_num("valor_adq_ng")
+
     parts = fecha_s.str.extract(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
     is_slash = parts[0].notna()
     fecha_norm = (parts[2] + "-" + parts[1].str.zfill(2) + "-" + parts[0].str.zfill(2)).where(is_slash, fecha_s)
@@ -139,11 +171,22 @@ def parse_sunat_propuesta(txt_bytes: bytes, tipo_libro: str) -> list[SunatRecord
             tipo_cambio    = tc,
             mto_exonerado  = exo,
             mto_inafecto   = ina,
+            ruc_proveedor  = ruc,
+            razon_social   = razon,
+            bi_dgng        = dgb,
+            igv_dgng       = dgi,
+            bi_dng         = dnb,
+            igv_dng        = dni,
+            valor_adq_ng   = ang,
+            moneda         = mon,
         )
-        for t, s, n, f, b, g, m, tc, exo, ina in zip(
+        for t, s, n, f, b, g, m, tc, exo, ina, ruc, razon, dgb, dgi, dnb, dni, ang, mon in zip(
             tipo_cdp_s.tolist(), serie_s.tolist(), numero_s.tolist(), fecha_norm.tolist(),
             base_s.tolist(), igv_s.tolist(), importe_s.tolist(), tc_s.tolist(),
             exo_s.tolist(), ina_s.tolist(),
+            ruc_s.tolist(), razon_s.tolist(),
+            dgng_b_s.tolist(), dgng_i_s.tolist(), dng_b_s.tolist(), dng_i_s.tolist(),
+            ang_s.tolist(), moneda_s.tolist(),
         )
     ]
 

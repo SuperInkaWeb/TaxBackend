@@ -20,7 +20,7 @@ from app.services.sire.ventas import (
     solicitar_export_ventas, consultar_ticket_ventas, descargar_ticket_ventas,
 )
 from app.models.file_mapping import CompanyFileMapping
-from app.services.parser.empresa_file import parse_empresa_file, KNOWN_FORMAT_COLUMNS_HELP
+from app.services.parser.empresa_file import parse_empresa_file, KNOWN_FORMAT_COLUMNS_HELP, PLE81_FORMAT_HELP
 from app.services.parser.sunat_propuesta import parse_sunat_propuesta
 from app.api.v1.file_mapping import _model_to_mapping
 from app.services.reconciliation.engine import reconcile
@@ -128,21 +128,24 @@ async def _run_reconciliation_task(
         ).first()
         saved_mapping = _model_to_mapping(saved_mapping_model) if saved_mapping_model else None
         empresa_records, used_mapping = await asyncio.to_thread(
-            parse_empresa_file, empresa_content, empresa_filename, saved_mapping
+            parse_empresa_file, empresa_content, empresa_filename, saved_mapping, tipo_libro.value
+        )
+
+        formato_esperado = (
+            PLE81_FORMAT_HELP if tipo_libro == TipoLibro.compras
+            else f"CSV con las columnas: {KNOWN_FORMAT_COLUMNS_HELP}"
         )
 
         if not empresa_records:
-            warnings = used_mapping.warnings
+            detalle = "; ".join(used_mapping.warnings) or "no se extrajo ningún registro"
             raise ValueError(
-                f"No se pudieron extraer registros del archivo. "
-                f"{'Usa /file-mapping/preview para configurar el formato.' if not saved_mapping_model else ''} "
-                f"Detalle: {'; '.join(warnings)}"
+                f"No se pudo procesar el archivo. {detalle}. Formato esperado: {formato_esperado}."
             )
 
         if not used_mapping.known_format:
             raise ValueError(
-                f"El archivo no tiene el formato esperado. Debe ser un CSV con las columnas: "
-                f"{KNOWN_FORMAT_COLUMNS_HELP}."
+                f"El archivo no tiene el formato esperado para {tipo_libro.value}. "
+                f"Formato esperado: {formato_esperado}."
             )
 
         async def get_token(force_refresh: bool = False) -> str:
