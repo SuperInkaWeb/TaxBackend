@@ -235,97 +235,183 @@ def generate_excel(
     ws.column_dimensions["C"].width = 22
     ws.column_dimensions["D"].width = 70
 
+    es_compras = tipo_libro == "compras"
+
     ws_a = wb.create_sheet("A - Solo en tu archivo")
-    _set_header_row(ws_a, [
-        "Tipo", "Serie", "Número", "Fecha emisión",
-        "Base imponible", "IGV", "Importe total", "Estado (tu archivo)", "Alerta",
-    ])
+    if es_compras:
+        _set_header_row(ws_a, [
+            "Tipo", "Serie", "Número", "Fecha emisión", "RUC Proveedor", "Proveedor",
+            "Base imponible", "IGV", "Importe total", "Alerta",
+        ])
+    else:
+        _set_header_row(ws_a, [
+            "Tipo", "Serie", "Número", "Fecha emisión",
+            "Base imponible", "IGV", "Importe total", "Estado (tu archivo)", "Alerta",
+        ])
     use_fmt_a = cnt_a <= EXCEL_FORMAT_LIMIT
+    col_alerta_a = 10 if es_compras else 9
     for row_idx, rec in enumerate(output.scenario_a, 2):
-        values = [
-            rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
-            rec.base_imponible, rec.igv, rec.importe_total,
-            rec.status_description,
-            "ROJO" if rec.es_alerta_roja else "ÁMBAR",
-        ]
+        if es_compras:
+            values = [
+                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
+                rec.ruc_proveedor, rec.razon_social,
+                rec.base_imponible, rec.igv, rec.importe_total,
+                "ROJO" if rec.es_alerta_roja else "ÁMBAR",
+            ]
+        else:
+            values = [
+                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
+                rec.base_imponible, rec.igv, rec.importe_total,
+                rec.status_description,
+                "ROJO" if rec.es_alerta_roja else "ÁMBAR",
+            ]
         for col_idx, val in enumerate(values, 1):
             cell = ws_a.cell(row=row_idx, column=col_idx, value=val)
             if use_fmt_a:
                 cell.border = THIN_BORDER
-                if col_idx == 8 and "RECHAZ" in str(val).upper():
+                if not es_compras and col_idx == 8 and "RECHAZ" in str(val).upper():
                     cell.font = Font(bold=True, color="9C0006")
-                elif col_idx == 9:
+                elif col_idx == col_alerta_a:
                     _alert_style(cell, rec.es_alerta_roja)
                     cell.alignment = Alignment(horizontal="center")
-    _finish_sheet(ws_a, 9, num_cols=[5, 6, 7])
+    _finish_sheet(ws_a, col_alerta_a, num_cols=[7, 8, 9] if es_compras else [5, 6, 7])
 
     ws_b = wb.create_sheet("B - Solo en SUNAT")
-    _set_header_row(ws_b, [
-        "Tipo", "Serie", "Número", "Fecha emisión SUNAT",
-        "Base imponible", "IGV", "Importe total", "Alerta",
-    ])
+    if es_compras:
+        _set_header_row(ws_b, [
+            "Tipo", "Serie", "Número", "Fecha emisión SUNAT", "RUC Proveedor", "Proveedor",
+            "Base imponible", "IGV", "Importe total", "Alerta",
+        ])
+    else:
+        _set_header_row(ws_b, [
+            "Tipo", "Serie", "Número", "Fecha emisión SUNAT",
+            "Base imponible", "IGV", "Importe total", "Alerta",
+        ])
     recs_b_sorted = sorted(output.scenario_b, key=lambda x: (not x.es_alerta_roja, -x.igv_sunat))
     recs_b = recs_b_sorted[:EXCEL_B_LIMIT]
     use_fmt_b = len(recs_b) <= EXCEL_FORMAT_LIMIT
+    col_alerta_b = 10 if es_compras else 8
 
     for row_idx, rec in enumerate(recs_b, 2):
-        values = [
-            rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
-            rec.base_imponible_sunat, rec.igv_sunat, rec.importe_total_sunat,
-            "ROJO" if rec.es_alerta_roja else "ÁMBAR",
-        ]
+        if es_compras:
+            values = [
+                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
+                rec.ruc_proveedor, rec.razon_social,
+                rec.base_imponible_sunat, rec.igv_sunat, rec.importe_total_sunat,
+                "ROJO" if rec.es_alerta_roja else "ÁMBAR",
+            ]
+        else:
+            values = [
+                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
+                rec.base_imponible_sunat, rec.igv_sunat, rec.importe_total_sunat,
+                "ROJO" if rec.es_alerta_roja else "ÁMBAR",
+            ]
         for col_idx, val in enumerate(values, 1):
             cell = ws_b.cell(row=row_idx, column=col_idx, value=val)
             if use_fmt_b:
                 cell.border = THIN_BORDER
-                if col_idx == 8:
+                if col_idx == col_alerta_b:
                     _alert_style(cell, rec.es_alerta_roja)
                     cell.alignment = Alignment(horizontal="center")
-    _finish_sheet(ws_b, 8, num_cols=[5, 6, 7])
+    _finish_sheet(ws_b, col_alerta_b, num_cols=[7, 8, 9] if es_compras else [5, 6, 7])
 
     ws_c = wb.create_sheet("C - Diferencias")
-    _set_header_row(ws_c, [
-        "Tipo", "Serie", "Número",
-        "Fecha (tu archivo)", "Fecha (SUNAT)",
-        "Base imp. (tu archivo)", "Base imp. (SUNAT)",
-        "IGV (tu archivo)", "IGV (SUNAT)",
-        "Total (tu archivo)", "Total (SUNAT)",
-        "Exonerado (tu archivo)", "Exonerado (SUNAT)",
-        "Inafecto (tu archivo)", "Inafecto (SUNAT)",
-        "Campos con diferencia", "Alerta",
-    ])
     use_fmt_c = cnt_c <= EXCEL_FORMAT_LIMIT
 
     CAMPO_LABELS = {
         "fecha": "Fecha", "base_imponible": "Base imponible",
         "igv": "IGV", "importe_total": "Importe total",
         "mto_exonerado": "Exonerado", "mto_inafecto": "Inafecto",
+        "bi_dgng": "BI DGNG", "igv_dgng": "IGV DGNG",
+        "bi_dng": "BI DNG", "igv_dng": "IGV DNG",
+        "valor_adq_ng": "Adq. no gravadas", "moneda": "Moneda", "tipo_cambio": "Tipo de cambio",
     }
-    CAMPO_COLS = {
-        "fecha":          (4, 5),
-        "base_imponible": (6, 7),
-        "igv":            (8, 9),
-        "importe_total":  (10, 11),
-        "mto_exonerado":  (12, 13),
-        "mto_inafecto":   (14, 15),
-    }
-    CAMPO_ORDER = ["fecha", "base_imponible", "igv", "importe_total", "mto_exonerado", "mto_inafecto"]
+
+    if es_compras:
+        _set_header_row(ws_c, [
+            "Tipo", "Serie", "Número", "RUC Proveedor", "Proveedor",
+            "Fecha (tu archivo)", "Fecha (SUNAT)",
+            "BI DG (tu archivo)", "BI DG (SUNAT)",
+            "IGV DG (tu archivo)", "IGV DG (SUNAT)",
+            "BI DGNG (tu archivo)", "BI DGNG (SUNAT)",
+            "IGV DGNG (tu archivo)", "IGV DGNG (SUNAT)",
+            "BI DNG (tu archivo)", "BI DNG (SUNAT)",
+            "IGV DNG (tu archivo)", "IGV DNG (SUNAT)",
+            "Adq. NG (tu archivo)", "Adq. NG (SUNAT)",
+            "Total (tu archivo)", "Total (SUNAT)",
+            "Moneda (tu archivo)", "Moneda (SUNAT)",
+            "TC (tu archivo)", "TC (SUNAT)",
+            "Campos con diferencia", "Alerta",
+        ])
+        CAMPO_COLS = {
+            "fecha": (6, 7), "base_imponible": (8, 9), "igv": (10, 11),
+            "bi_dgng": (12, 13), "igv_dgng": (14, 15),
+            "bi_dng": (16, 17), "igv_dng": (18, 19),
+            "valor_adq_ng": (20, 21), "importe_total": (22, 23),
+            "moneda": (24, 25), "tipo_cambio": (26, 27),
+        }
+        CAMPO_ORDER = [
+            "fecha", "base_imponible", "igv", "bi_dgng", "igv_dgng",
+            "bi_dng", "igv_dng", "valor_adq_ng", "importe_total", "moneda", "tipo_cambio",
+        ]
+        n_cols_c = 29
+        num_cols_c = list(range(8, 24)) + [26, 27]
+    else:
+        _set_header_row(ws_c, [
+            "Tipo", "Serie", "Número",
+            "Fecha (tu archivo)", "Fecha (SUNAT)",
+            "Base imp. (tu archivo)", "Base imp. (SUNAT)",
+            "IGV (tu archivo)", "IGV (SUNAT)",
+            "Total (tu archivo)", "Total (SUNAT)",
+            "Exonerado (tu archivo)", "Exonerado (SUNAT)",
+            "Inafecto (tu archivo)", "Inafecto (SUNAT)",
+            "Campos con diferencia", "Alerta",
+        ])
+        CAMPO_COLS = {
+            "fecha":          (4, 5),
+            "base_imponible": (6, 7),
+            "igv":            (8, 9),
+            "importe_total":  (10, 11),
+            "mto_exonerado":  (12, 13),
+            "mto_inafecto":   (14, 15),
+        }
+        CAMPO_ORDER = ["fecha", "base_imponible", "igv", "importe_total", "mto_exonerado", "mto_inafecto"]
+        n_cols_c = 17
+        num_cols_c = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 
     for row_idx, rec in enumerate(output.scenario_c, 2):
         campos = rec.campos_diferentes
         campos_txt = ", ".join(CAMPO_LABELS[c] for c in CAMPO_ORDER if c in campos)
 
-        values = [
-            rec.tipo_cdp, rec.serie, rec.numero,
-            rec.fecha_emision_empresa, rec.fecha_emision_sunat,
-            rec.base_imponible_empresa, rec.base_imponible_sunat,
-            rec.igv_empresa, rec.igv_sunat,
-            rec.importe_total_empresa, rec.importe_total_sunat,
-            rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
-            rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
-            campos_txt,
-            "ROJO" if rec.es_alerta_roja else "ÁMBAR",
-        ]
+        if es_compras:
+            values = [
+                rec.tipo_cdp, rec.serie, rec.numero, rec.ruc_proveedor, rec.razon_social,
+                rec.fecha_emision_empresa, rec.fecha_emision_sunat,
+                rec.base_imponible_empresa, rec.base_imponible_sunat,
+                rec.igv_empresa, rec.igv_sunat,
+                rec.bi_dgng_empresa, rec.bi_dgng_sunat,
+                rec.igv_dgng_empresa, rec.igv_dgng_sunat,
+                rec.bi_dng_empresa, rec.bi_dng_sunat,
+                rec.igv_dng_empresa, rec.igv_dng_sunat,
+                rec.valor_adq_ng_empresa, rec.valor_adq_ng_sunat,
+                rec.importe_total_empresa, rec.importe_total_sunat,
+                rec.moneda_empresa, rec.moneda_sunat,
+                rec.tipo_cambio_empresa, rec.tipo_cambio_sunat,
+                campos_txt,
+                "ROJO" if rec.es_alerta_roja else "ÁMBAR",
+            ]
+        else:
+            values = [
+                rec.tipo_cdp, rec.serie, rec.numero,
+                rec.fecha_emision_empresa, rec.fecha_emision_sunat,
+                rec.base_imponible_empresa, rec.base_imponible_sunat,
+                rec.igv_empresa, rec.igv_sunat,
+                rec.importe_total_empresa, rec.importe_total_sunat,
+                rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
+                rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
+                campos_txt,
+                "ROJO" if rec.es_alerta_roja else "ÁMBAR",
+            ]
         diff_cols = {col for campo in campos for col in CAMPO_COLS.get(campo, ())}
 
         for col_idx, val in enumerate(values, 1):
@@ -335,82 +421,144 @@ def generate_excel(
                 if col_idx in diff_cols:
                     cell.fill = DIFF_FILL
                     cell.font = BOLD
-                elif col_idx == 17:
+                elif col_idx == n_cols_c:
                     _alert_style(cell, rec.es_alerta_roja)
                     cell.alignment = Alignment(horizontal="center")
-    _finish_sheet(ws_c, 17, num_cols=[6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+    _finish_sheet(ws_c, n_cols_c, num_cols=num_cols_c)
 
     ws_d = wb.create_sheet("D - Coinciden OK")
-    _set_header_row(ws_d, [
-        "Tipo", "Serie", "Número",
-        "Fecha (tu archivo)", "Fecha (SUNAT)",
-        "Base imp. (tu archivo)", "Base imp. (SUNAT)",
-        "IGV (tu archivo)", "IGV (SUNAT)",
-        "Total (tu archivo)", "Total (SUNAT)",
-        "Exonerado (tu archivo)", "Exonerado (SUNAT)",
-        "Inafecto (tu archivo)", "Inafecto (SUNAT)",
-    ])
+    if es_compras:
+        _set_header_row(ws_d, [
+            "Tipo", "Serie", "Número", "RUC Proveedor", "Proveedor",
+            "Fecha (tu archivo)", "Fecha (SUNAT)",
+            "BI DG (tu archivo)", "BI DG (SUNAT)",
+            "IGV DG (tu archivo)", "IGV DG (SUNAT)",
+            "Total (tu archivo)", "Total (SUNAT)",
+            "Moneda (tu archivo)", "Moneda (SUNAT)",
+            "TC (tu archivo)", "TC (SUNAT)",
+        ])
+        n_cols_d = 17
+        num_cols_d = [8, 9, 10, 11, 12, 13, 16, 17]
+    else:
+        _set_header_row(ws_d, [
+            "Tipo", "Serie", "Número",
+            "Fecha (tu archivo)", "Fecha (SUNAT)",
+            "Base imp. (tu archivo)", "Base imp. (SUNAT)",
+            "IGV (tu archivo)", "IGV (SUNAT)",
+            "Total (tu archivo)", "Total (SUNAT)",
+            "Exonerado (tu archivo)", "Exonerado (SUNAT)",
+            "Inafecto (tu archivo)", "Inafecto (SUNAT)",
+        ])
+        n_cols_d = 15
+        num_cols_d = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     use_fmt_d = cnt_d <= EXCEL_FORMAT_LIMIT
     recs_d = output.scenario_d[:EXCEL_MAX_DATA_ROWS]
     for row_idx, rec in enumerate(recs_d, 2):
-        values = [
-            rec.tipo_cdp, rec.serie, rec.numero,
-            rec.fecha_emision_empresa, rec.fecha_emision_sunat,
-            rec.base_imponible_empresa, rec.base_imponible_sunat,
-            rec.igv_empresa, rec.igv_sunat,
-            rec.importe_total_empresa, rec.importe_total_sunat,
-            rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
-            rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
-        ]
+        if es_compras:
+            values = [
+                rec.tipo_cdp, rec.serie, rec.numero, rec.ruc_proveedor, rec.razon_social,
+                rec.fecha_emision_empresa, rec.fecha_emision_sunat,
+                rec.base_imponible_empresa, rec.base_imponible_sunat,
+                rec.igv_empresa, rec.igv_sunat,
+                rec.importe_total_empresa, rec.importe_total_sunat,
+                rec.moneda_empresa, rec.moneda_sunat,
+                rec.tipo_cambio_empresa, rec.tipo_cambio_sunat,
+            ]
+        else:
+            values = [
+                rec.tipo_cdp, rec.serie, rec.numero,
+                rec.fecha_emision_empresa, rec.fecha_emision_sunat,
+                rec.base_imponible_empresa, rec.base_imponible_sunat,
+                rec.igv_empresa, rec.igv_sunat,
+                rec.importe_total_empresa, rec.importe_total_sunat,
+                rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
+                rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
+            ]
         for col_idx, val in enumerate(values, 1):
             cell = ws_d.cell(row=row_idx, column=col_idx, value=val)
             if use_fmt_d:
                 cell.border = THIN_BORDER
-    _finish_sheet(ws_d, 15, num_cols=[6, 7, 8, 9, 10, 11, 12, 13, 14, 15] if use_fmt_d else None)
+    _finish_sheet(ws_d, n_cols_d, num_cols=num_cols_d if use_fmt_d else None)
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-def generate_csv_b(output: ReconciliationOutput) -> bytes:
+def generate_csv_b(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
     """CSV completo del Escenario B — solo se genera cuando B supera EXCEL_B_LIMIT."""
+    es_compras = tipo_libro == "compras"
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow([
-        "Tipo CDP", "Serie", "Numero", "Fecha Emision SUNAT",
-        "Base Imponible", "IGV", "Importe Total", "Alerta",
-    ])
-    for rec in output.scenario_b:
+    if es_compras:
         w.writerow([
-            rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
-            rec.base_imponible_sunat, rec.igv_sunat, rec.importe_total_sunat,
-            "ROJO" if rec.es_alerta_roja else "AMBAR",
+            "Tipo CDP", "Serie", "Numero", "Fecha Emision SUNAT", "RUC Proveedor", "Proveedor",
+            "Base Imponible", "IGV", "Importe Total", "Alerta",
         ])
+        for rec in output.scenario_b:
+            w.writerow([
+                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
+                rec.ruc_proveedor, rec.razon_social,
+                rec.base_imponible_sunat, rec.igv_sunat, rec.importe_total_sunat,
+                "ROJO" if rec.es_alerta_roja else "AMBAR",
+            ])
+    else:
+        w.writerow([
+            "Tipo CDP", "Serie", "Numero", "Fecha Emision SUNAT",
+            "Base Imponible", "IGV", "Importe Total", "Alerta",
+        ])
+        for rec in output.scenario_b:
+            w.writerow([
+                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
+                rec.base_imponible_sunat, rec.igv_sunat, rec.importe_total_sunat,
+                "ROJO" if rec.es_alerta_roja else "AMBAR",
+            ])
     return buf.getvalue().encode("utf-8-sig")
 
 
-def generate_csv_d(output: ReconciliationOutput) -> bytes:
+def generate_csv_d(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
     """CSV completo del Escenario D — solo se genera cuando D supera EXCEL_D_LIMIT."""
+    es_compras = tipo_libro == "compras"
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow([
-        "Tipo CDP", "Serie", "Numero",
-        "Fecha (Empresa)", "Fecha (SUNAT)",
-        "Base Imponible (Empresa)", "Base Imponible (SUNAT)",
-        "IGV (Empresa)", "IGV (SUNAT)",
-        "Importe Total (Empresa)", "Importe Total (SUNAT)",
-        "Exonerado (Empresa)", "Exonerado (SUNAT)",
-        "Inafecto (Empresa)", "Inafecto (SUNAT)",
-    ])
-    for rec in output.scenario_d:
+    if es_compras:
         w.writerow([
-            rec.tipo_cdp, rec.serie, rec.numero,
-            rec.fecha_emision_empresa, rec.fecha_emision_sunat,
-            rec.base_imponible_empresa, rec.base_imponible_sunat,
-            rec.igv_empresa, rec.igv_sunat,
-            rec.importe_total_empresa, rec.importe_total_sunat,
-            rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
-            rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
+            "Tipo CDP", "Serie", "Numero", "RUC Proveedor", "Proveedor",
+            "Fecha (Empresa)", "Fecha (SUNAT)",
+            "BI DG (Empresa)", "BI DG (SUNAT)",
+            "IGV DG (Empresa)", "IGV DG (SUNAT)",
+            "Importe Total (Empresa)", "Importe Total (SUNAT)",
+            "Moneda (Empresa)", "Moneda (SUNAT)",
+            "TC (Empresa)", "TC (SUNAT)",
         ])
+        for rec in output.scenario_d:
+            w.writerow([
+                rec.tipo_cdp, rec.serie, rec.numero, rec.ruc_proveedor, rec.razon_social,
+                rec.fecha_emision_empresa, rec.fecha_emision_sunat,
+                rec.base_imponible_empresa, rec.base_imponible_sunat,
+                rec.igv_empresa, rec.igv_sunat,
+                rec.importe_total_empresa, rec.importe_total_sunat,
+                rec.moneda_empresa, rec.moneda_sunat,
+                rec.tipo_cambio_empresa, rec.tipo_cambio_sunat,
+            ])
+    else:
+        w.writerow([
+            "Tipo CDP", "Serie", "Numero",
+            "Fecha (Empresa)", "Fecha (SUNAT)",
+            "Base Imponible (Empresa)", "Base Imponible (SUNAT)",
+            "IGV (Empresa)", "IGV (SUNAT)",
+            "Importe Total (Empresa)", "Importe Total (SUNAT)",
+            "Exonerado (Empresa)", "Exonerado (SUNAT)",
+            "Inafecto (Empresa)", "Inafecto (SUNAT)",
+        ])
+        for rec in output.scenario_d:
+            w.writerow([
+                rec.tipo_cdp, rec.serie, rec.numero,
+                rec.fecha_emision_empresa, rec.fecha_emision_sunat,
+                rec.base_imponible_empresa, rec.base_imponible_sunat,
+                rec.igv_empresa, rec.igv_sunat,
+                rec.importe_total_empresa, rec.importe_total_sunat,
+                rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
+                rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
+            ])
     return buf.getvalue().encode("utf-8-sig")

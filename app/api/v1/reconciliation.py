@@ -205,11 +205,11 @@ async def _run_reconciliation_task(
 
         csv_b_bytes = None
         if len(recon_output.scenario_b) > EXCEL_B_LIMIT:
-            csv_b_bytes = await asyncio.to_thread(generate_csv_b, recon_output)
+            csv_b_bytes = await asyncio.to_thread(generate_csv_b, recon_output, tipo_libro.value)
 
         csv_d_bytes = None
         if len(recon_output.scenario_d) > EXCEL_D_LIMIT:
-            csv_d_bytes = await asyncio.to_thread(generate_csv_d, recon_output)
+            csv_d_bytes = await asyncio.to_thread(generate_csv_d, recon_output, tipo_libro.value)
 
         filename_xlsx = f"{company.ruc}_{periodo}_{tipo_libro.value}.xlsx"
         path_xlsx = f"reportes/{company_id}/{job_id}/{filename_xlsx}"

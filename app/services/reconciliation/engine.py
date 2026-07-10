@@ -121,6 +121,12 @@ class ScenarioDRecord:
     mto_exonerado_sunat: float
     mto_inafecto_empresa: float
     mto_inafecto_sunat: float
+    ruc_proveedor: str = ""
+    razon_social: str = ""
+    moneda_empresa: str = ""
+    moneda_sunat: str = ""
+    tipo_cambio_empresa: float = 0.0
+    tipo_cambio_sunat: float = 0.0
 
 
 @dataclass
@@ -314,6 +320,12 @@ def reconcile(
                 mto_exonerado_sunat    = sun.mto_exonerado,
                 mto_inafecto_empresa   = emp.mto_inafecto,
                 mto_inafecto_sunat     = sun.mto_inafecto,
+                ruc_proveedor          = emp.ruc_proveedor,
+                razon_social           = emp.razon_social or sun.razon_social,
+                moneda_empresa         = emp.moneda,
+                moneda_sunat           = sun.moneda,
+                tipo_cambio_empresa    = emp.tipo_cambio,
+                tipo_cambio_sunat      = sun.tipo_cambio,
             ))
 
     return ReconciliationOutput(
