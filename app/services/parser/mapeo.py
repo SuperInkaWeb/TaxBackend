@@ -160,6 +160,7 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
     """Inspecciona el archivo y devuelve columnas + mapeo propuesto + validación."""
     encoding = _detect_encoding(content)
     solo_lectura = False
+    formato = None
 
     # Nivel 1 ventas: PLE 14.1 (parser dedicado — pliega descuentos, aritmética completa)
     if tipo_libro == "ventas" and _try_parse_as_ple_ventas(content) is not None:
@@ -168,6 +169,7 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
         mapeo = dict(_PLE141_A_CAMPO)
         combinado = False
         solo_lectura = True
+        formato = "PLE 14.1 — Registro de Ventas"
     # Nivel 1 compras: PLE 8.1
     elif tipo_libro == "compras" and es_ple_compras(content):
         delimiter, has_header = "|", False
@@ -175,6 +177,7 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
         mapeo = dict(_PLE_A_CAMPO)
         combinado = False
         solo_lectura = True
+        formato = "PLE 8.1 — Registro de Compras"
     else:
         text = content.decode(encoding, errors="replace")
         lines = [l for l in text.splitlines() if l.strip()]
@@ -245,6 +248,7 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
 
     return {
         "nivel": nivel,
+        "formato": formato,
         "config": config,
         "columnas_archivo": columnas_archivo,
         "campos": campos_de(tipo_libro),
