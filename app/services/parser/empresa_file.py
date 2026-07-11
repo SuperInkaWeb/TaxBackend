@@ -394,6 +394,19 @@ PLE81_FORMAT_HELP = (
     "sin encabezados, con el periodo (AAAAMM00) como primer campo"
 )
 
+PLE141_FORMAT_HELP = (
+    "TXT del Registro de Ventas electrónico (PLE 14.1 v5): campos separados por '|', "
+    "sin encabezados, con el periodo (AAAAMM00) como primer campo"
+)
+
+_PLE141_IDX = {
+    "fecha": 3, "tipo": 5, "serie": 6, "numero": 7,
+    "exportacion": 12, "bi": 13, "dscto_bi": 14, "igv": 15, "dscto_igv": 16,
+    "exonerado": 17, "inafecto": 18, "isc": 19,
+    "bi_ivap": 20, "ivap": 21, "icbper": 22, "otros": 23,
+    "total": 24, "moneda": 25, "tipo_cambio": 26,
+}
+
 
 def es_ple_compras(content: bytes) -> bool:
     """Detección rápida por firma estructural del PLE 8.1 (solo la primera línea)."""
@@ -500,6 +513,94 @@ def _try_parse_as_ple_compras(content: bytes) -> list[EmpresaRecord] | None:
             col_n(_PLE81_IDX["total"]).tolist(),
             col_s(_PLE81_IDX["moneda"]).tolist(),
             col_n(_PLE81_IDX["tipo_cambio"]).tolist(),
+        )
+    ]
+
+
+def _try_parse_as_ple_ventas(content: bytes) -> list[EmpresaRecord] | None:
+    """
+    Parsea el Registro de Ventas electrónico PLE 14.1 v5 (36 campos, posicional).
+    Chequeo aritmético con TODOS los componentes:
+    total(25) = exportación+BI+dsctoBI+IGV+dsctoIGV+exonerado+inafecto+ISC+IVAP+ICBPER+otros.
+    BI y dscto se pliegan (BI+dscto), igual que hace el parser de la propuesta SIRE.
+    """
+    if not es_ple_compras(content):  # misma firma inicial: periodo|CUO|correlativo|fecha
+        return None
+
+    encoding = _detect_encoding(content)
+    text = content.decode(encoding, errors="replace")
+
+    try:
+        df = pd.read_csv(
+            io.StringIO(text),
+            sep="|",
+            header=None,
+            dtype=str,
+            skip_blank_lines=True,
+            on_bad_lines="skip",
+        )
+    except Exception:
+        return None
+
+    if df.empty or len(df.columns) < 27:
+        return None
+
+    def col_s(i: int) -> pd.Series:
+        return df.iloc[:, i].fillna("").astype(str).str.strip()
+
+    def col_n(i: int) -> pd.Series:
+        return pd.to_numeric(
+            col_s(i).str.replace(",", "", regex=False), errors="coerce"
+        ).fillna(0.0)
+
+    I = _PLE141_IDX
+    total_s = col_n(I["total"])
+    suma_s = sum(
+        col_n(I[c])
+        for c in ("exportacion", "bi", "dscto_bi", "igv", "dscto_igv",
+                  "exonerado", "inafecto", "isc", "bi_ivap", "ivap", "icbper", "otros")
+    )
+    muestra = min(len(df), 2000)
+    cuadran = ((suma_s.iloc[:muestra] - total_s.iloc[:muestra]).abs() <= 0.02).mean()
+    if cuadran < 0.9:
+        return None
+
+    valid = ~col_s(I["numero"]).eq("")
+    df = df[valid].reset_index(drop=True)
+    if df.empty:
+        return []
+
+    fecha_arr = _norm_date_series(col_s(I["fecha"]))
+    base_arr = (col_n(I["bi"]) + col_n(I["dscto_bi"]))
+    igv_arr = (col_n(I["igv"]) + col_n(I["dscto_igv"]))
+    tc_arr = col_n(I["tipo_cambio"]).replace(0.0, 1.0)
+
+    return [
+        EmpresaRecord(
+            tipo_cdp      = t,
+            serie         = s,
+            numero        = n,
+            importe_total = tot,
+            fecha_emision = f,
+            base_imponible= b,
+            igv           = g,
+            mto_exonerado = exo,
+            mto_inafecto  = ina,
+            moneda        = mon,
+            tipo_cambio   = tc,
+        )
+        for t, s, n, f, b, g, exo, ina, tot, mon, tc in zip(
+            col_s(I["tipo"]).tolist(),
+            col_s(I["serie"]).tolist(),
+            col_s(I["numero"]).tolist(),
+            fecha_arr.tolist(),
+            base_arr.tolist(),
+            igv_arr.tolist(),
+            col_n(I["exonerado"]).tolist(),
+            col_n(I["inafecto"]).tolist(),
+            col_n(I["total"]).tolist(),
+            col_s(I["moneda"]).tolist(),
+            tc_arr.tolist(),
         )
     ]
 
@@ -654,9 +755,13 @@ def parse_empresa_file(
                 "El archivo tiene el formato del sistema de VENTAS — elegiste el libro de COMPRAS. "
                 "Para compras se espera el TXT PLE 8.1."
             )
+        elif _try_parse_as_ple_ventas(content) is not None:
+            rechazo.warnings.append(
+                "El archivo parece un Registro de VENTAS (PLE 14.1) — elegiste el libro de COMPRAS."
+            )
         elif es_ple_compras(content):
             rechazo.warnings.append(
-                "El archivo parece un PLE 8.1 pero sus montos no cuadran con el estándar "
+                "El archivo parece un PLE pero sus montos no cuadran con el estándar 8.1 "
                 "(total ≠ suma de componentes) — posible estructura corrida o versión no soportada."
             )
         return [], rechazo
@@ -668,11 +773,23 @@ def parse_empresa_file(
         )
         return known_records, known_mapping
 
+    ple_ventas_records = _try_parse_as_ple_ventas(content)
+    if ple_ventas_records is not None:
+        return ple_ventas_records, ColumnMapping(
+            confidence=0.99, has_header=False, confirmed_by_user=True, known_format=True,
+        )
+
     if es_ple_compras(content):
         rechazo = ColumnMapping(known_format=False)
-        rechazo.warnings.append(
-            "El archivo parece un Registro de COMPRAS (PLE 8.1) — elegiste el libro de VENTAS."
-        )
+        if _try_parse_as_ple_compras(content) is not None:
+            rechazo.warnings.append(
+                "El archivo parece un Registro de COMPRAS (PLE 8.1) — elegiste el libro de VENTAS."
+            )
+        else:
+            rechazo.warnings.append(
+                "El archivo parece un PLE pero sus montos no cuadran con el estándar 14.1 "
+                "(total ≠ suma de componentes) — posible estructura corrida o versión no soportada."
+            )
         return [], rechazo
 
     if saved_mapping and saved_mapping.confirmed_by_user and saved_mapping.is_usable:

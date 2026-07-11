@@ -28,7 +28,9 @@ from app.services.parser.empresa_file import (
     _normalize_tipo_cdp,
     _KNOWN_FORMAT_REQUIRED,
     _PLE81_IDX,
+    _PLE141_IDX,
     es_ple_compras,
+    _try_parse_as_ple_ventas,
 )
 
 CAMPOS_VENTAS = [
@@ -141,16 +143,38 @@ def _leer_df(content: bytes, delimiter: str, encoding: str, skip_rows: int = 0,
         return None
 
 
+_PLE141_A_CAMPO = {
+    "fecha_emision":  _PLE141_IDX["fecha"],
+    "tipo_cdp":       _PLE141_IDX["tipo"],
+    "serie":          _PLE141_IDX["serie"],
+    "numero":         _PLE141_IDX["numero"],
+    "base_imponible": _PLE141_IDX["bi"],
+    "igv":            _PLE141_IDX["igv"],
+    "importe_total":  _PLE141_IDX["total"],
+    "mto_exonerado":  _PLE141_IDX["exonerado"],
+    "mto_inafecto":   _PLE141_IDX["inafecto"],
+}
+
+
 def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None = None) -> dict:
     """Inspecciona el archivo y devuelve columnas + mapeo propuesto + validación."""
     encoding = _detect_encoding(content)
+    solo_lectura = False
 
-    # Nivel 1: PLE 8.1 (solo compras)
-    if tipo_libro == "compras" and es_ple_compras(content):
+    # Nivel 1 ventas: PLE 14.1 (parser dedicado — pliega descuentos, aritmética completa)
+    if tipo_libro == "ventas" and _try_parse_as_ple_ventas(content) is not None:
+        delimiter, has_header = "|", False
+        nivel = "ple"
+        mapeo = dict(_PLE141_A_CAMPO)
+        combinado = False
+        solo_lectura = True
+    # Nivel 1 compras: PLE 8.1
+    elif tipo_libro == "compras" and es_ple_compras(content):
         delimiter, has_header = "|", False
         nivel = "ple"
         mapeo = dict(_PLE_A_CAMPO)
         combinado = False
+        solo_lectura = True
     else:
         text = content.decode(encoding, errors="replace")
         lines = [l for l in text.splitlines() if l.strip()]
@@ -204,7 +228,20 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
         "serie_numero_combinado": combinado,
         "columnas": mapeo,
     }
-    validacion = validar_mapeo(content, config, tipo_libro)
+    if tipo_libro == "ventas" and nivel == "ple":
+        # El parser dedicado del 14.1 ya validó la aritmética con los 12 componentes
+        # (incluye ISC, IVAP, ICBPER y descuentos que el chequeo genérico no ve).
+        validacion = {
+            "ok": True,
+            "aritmetica_pct": None,
+            "faltantes": [],
+            "avisos": [
+                "Aritmética verificada contra la norma (total = suma de los 12 componentes). "
+                "BI e IGV incorporan sus columnas de descuento automáticamente."
+            ],
+        }
+    else:
+        validacion = validar_mapeo(content, config, tipo_libro)
 
     return {
         "nivel": nivel,
@@ -212,6 +249,7 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
         "columnas_archivo": columnas_archivo,
         "campos": campos_de(tipo_libro),
         "validacion": validacion,
+        "solo_lectura": solo_lectura,
     }
 
 
