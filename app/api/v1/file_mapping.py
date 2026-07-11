@@ -13,13 +13,14 @@ Flujo en el frontend:
 import io
 import re
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.api.deps import get_current_user, require_empresa_or_above
+from app.api.deps import get_current_user, require_empresa_or_above, require_any_role
 from app.models.user import User
 from app.models.file_mapping import CompanyFileMapping
 from app.services.parser.empresa_file import detect_mapping, ColumnMapping
+from app.services.parser.mapeo import analizar_archivo, validar_mapeo
 from app.schemas.file_mapping import FileMappingResponse, FileMappingManual, FilePreviewResponse
 
 router = APIRouter(prefix="/file-mapping", tags=["file-mapping"])
@@ -61,6 +62,62 @@ def _get_sample_rows(content: bytes, mapping: ColumnMapping, n: int = MAX_SAMPLE
         return [[str(v) for v in row] for row in rows]
     except Exception:
         return []
+
+
+@router.post("/analizar")
+async def analizar(
+    tipo_libro: str = Form(...),
+    archivo: UploadFile = File(...),
+    current_user: User = Depends(require_any_role),
+    db: Session = Depends(get_db),
+):
+    """
+    Analiza el archivo para la tarjeta de mapeo de la conciliación:
+    columnas con muestras + mapeo propuesto (según nivel detectado) + validación.
+    """
+    if not current_user.company_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sin empresa asignada")
+    if tipo_libro not in ("ventas", "compras"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tipo_libro inválido")
+
+    content = await archivo.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El archivo está vacío")
+
+    saved = db.query(CompanyFileMapping).filter(
+        CompanyFileMapping.company_id == current_user.company_id,
+        CompanyFileMapping.tipo_libro == tipo_libro,
+    ).first()
+    saved_config = None
+    if saved and saved.columnas and saved.confirmed_by_user:
+        saved_config = {
+            "delimiter": saved.delimiter,
+            "has_header": saved.has_header,
+            "serie_numero_combinado": saved.serie_numero_combinado,
+            "columnas": saved.columnas,
+        }
+
+    resultado = analizar_archivo(content, tipo_libro, saved_config)
+    if "error" in resultado:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=resultado["error"])
+    return resultado
+
+
+@router.post("/validar")
+async def validar(
+    tipo_libro: str = Form(...),
+    config: str = Form(..., description="JSON del mapeo a validar"),
+    archivo: UploadFile = File(...),
+    current_user: User = Depends(require_any_role),
+):
+    """Re-valida un mapeo ajustado por el usuario contra el archivo (aritmética + obligatorios)."""
+    import json
+    try:
+        cfg = json.loads(config)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="config no es JSON válido")
+    content = await archivo.read()
+    return validar_mapeo(content, cfg, tipo_libro)
 
 
 @router.post("/preview", response_model=FilePreviewResponse)

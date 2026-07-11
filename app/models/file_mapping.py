@@ -13,12 +13,16 @@ class CompanyFileMapping(Base):
     __tablename__ = "company_file_mappings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    company_id: Mapped[int] = mapped_column(Integer, ForeignKey("companies.id"), unique=True, nullable=False)
+    company_id: Mapped[int] = mapped_column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    tipo_libro: Mapped[str] = mapped_column(String(10), default="ventas", nullable=False)
 
     delimiter: Mapped[str] = mapped_column(String(5), default="|")
     encoding: Mapped[str] = mapped_column(String(20), default="latin-1")
     has_header: Mapped[bool] = mapped_column(Boolean, default=False)
     skip_rows: Mapped[int] = mapped_column(Integer, default=0)
+
+    columnas: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    serie_numero_combinado: Mapped[bool] = mapped_column(Boolean, default=False)
 
     col_tipo_cdp: Mapped[int | None] = mapped_column(Integer, nullable=True)
     col_serie: Mapped[int | None] = mapped_column(Integer, nullable=True)
