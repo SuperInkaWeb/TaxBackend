@@ -168,6 +168,7 @@ def reconcile(
     empresa_records: list[EmpresaRecord],
     sunat_records: list[SunatRecord],
     tipo_libro: str = "ventas",
+    cobertura_fechas: set[str] | None = None,
 ) -> ReconciliationOutput:
     es_compras = tipo_libro == "compras"
     tipos_ok = TIPOS_CONCILIABLES_COMPRAS if es_compras else TIPOS_CONCILIABLES
@@ -181,12 +182,19 @@ def reconcile(
     csv_duplicados   = len(conciliables) - len(empresa_index)
     sunat_duplicados = len(sunat_records) - len(sunat_index)
 
-    # En ventas el CSV es un corte por fechas del mes → B se filtra a esas fechas.
-    # En compras el PLE es el registro íntegro del periodo (con fechas de emisión
-    # dispersas por meses) → B compara periodo completo, sin filtro.
-    csv_dates: set[str] = (
-        set() if es_compras else {r.fecha_emision for r in conciliables if r.fecha_emision}
-    )
+    # Filtro de fechas del Escenario B:
+    # - compras: nunca — el PLE es el registro íntegro del periodo y las fechas
+    #   de emisión están dispersas por meses (filtrar ocultaría crédito fiscal).
+    # - ventas con cobertura DECLARADA: usa ese conjunto (set vacío = mes
+    #   completo, sin filtro). Incluye días declarados aunque el archivo no
+    #   traiga filas de ese día — así los huecos aparecen en B.
+    # - ventas sin declaración (legacy/API): fechas presentes en el archivo.
+    if es_compras:
+        csv_dates: set[str] = set()
+    elif cobertura_fechas is not None:
+        csv_dates = set(cobertura_fechas)
+    else:
+        csv_dates = {r.fecha_emision for r in conciliables if r.fecha_emision}
 
     scenario_a: list[ScenarioARecord] = []
     for key, emp in empresa_index.items():

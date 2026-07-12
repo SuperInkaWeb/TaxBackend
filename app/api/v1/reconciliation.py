@@ -75,6 +75,32 @@ def _build_response(job: ReconciliationJob) -> ReconciliationJobResponse:
 TICKET_FRESCURA_HORAS = 24
 
 
+def _descripcion_cobertura(fechas: list[str] | None) -> str | None:
+    """Texto legible de la cobertura declarada, para el Excel y trazabilidad."""
+    if fechas is None:
+        return None
+    if not fechas:
+        return "Mes completo"
+
+    def fmt(d: str) -> str:
+        return f"{d[8:10]}/{d[5:7]}/{d[0:4]}"
+
+    fs = sorted(fechas)
+    if len(fs) == 1:
+        return fmt(fs[0])
+    try:
+        from datetime import date
+        ds = [date.fromisoformat(f) for f in fs]
+        contiguo = all((ds[i + 1] - ds[i]).days == 1 for i in range(len(ds) - 1))
+    except ValueError:
+        contiguo = False
+    if contiguo:
+        return f"del {fmt(fs[0])} al {fmt(fs[-1])}"
+    if len(fs) <= 6:
+        return ", ".join(fmt(f) for f in fs)
+    return f"{len(fs)} días entre el {fmt(fs[0])} y el {fmt(fs[-1])}"
+
+
 def _buscar_ticket_fresco(
     db: Session,
     company_id: int,
@@ -106,6 +132,7 @@ async def _run_reconciliation_task(
     resume: bool = False,
     reuse: bool = False,
     mapeo_config: dict | None = None,
+    cobertura_fechas: list[str] | None = None,
 ) -> None:
     """
     Tarea de fondo que ejecuta la conciliación completa.
@@ -216,7 +243,10 @@ async def _run_reconciliation_task(
 
         sunat_records = await asyncio.to_thread(parse_sunat_propuesta, sunat_bytes, tipo_libro.value)
 
-        recon_output = await asyncio.to_thread(reconcile, empresa_records, sunat_records, tipo_libro.value)
+        recon_output = await asyncio.to_thread(
+            reconcile, empresa_records, sunat_records, tipo_libro.value,
+            set(cobertura_fechas) if cobertura_fechas is not None else None,
+        )
 
         excel_bytes = await asyncio.to_thread(
             generate_excel,
@@ -226,6 +256,7 @@ async def _run_reconciliation_task(
             periodo=periodo,
             tipo_libro=tipo_libro.value,
             propuesta_generada=job.propuesta_origen_at,
+            cobertura=_descripcion_cobertura(cobertura_fechas),
         )
 
         csv_b_bytes = None
@@ -309,6 +340,10 @@ async def run_reconciliation(
     archivo: UploadFile = File(..., description="Archivo TXT o CSV de la empresa"),
     reutilizar_propuesta: bool = Form(False, description="Reutilizar propuesta SUNAT fresca si existe"),
     mapeo_columnas: str | None = Form(None, description="JSON del mapeo de columnas confirmado por el usuario"),
+    cobertura_fechas: str | None = Form(
+        None,
+        description="JSON array de fechas AAAA-MM-DD que el archivo declara cubrir (solo ventas). Array vacío = mes completo.",
+    ),
     current_user: User = Depends(require_any_role),
     db: Session = Depends(get_db),
 ):
@@ -328,6 +363,23 @@ async def run_reconciliation(
     empresa_content = await archivo.read()
     if not empresa_content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El archivo está vacío")
+
+    cobertura: list[str] | None = None
+    if cobertura_fechas is not None and tipo_libro == TipoLibro.ventas:
+        try:
+            cobertura = json.loads(cobertura_fechas)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="cobertura_fechas no es un JSON válido",
+            )
+        if not isinstance(cobertura, list) or not all(
+            isinstance(f, str) and len(f) == 10 for f in cobertura
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="cobertura_fechas debe ser una lista de fechas AAAA-MM-DD",
+            )
 
     mapeo_config: dict | None = None
     if mapeo_columnas:
@@ -382,6 +434,7 @@ async def run_reconciliation(
         False,
         reutilizar_propuesta,
         mapeo_config,
+        cobertura,
     )
 
     return _build_response(job)

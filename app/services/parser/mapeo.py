@@ -246,6 +246,22 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
     else:
         validacion = validar_mapeo(content, config, tipo_libro)
 
+    # Fechas de emisión presentes en el archivo (solo ventas — alimenta el
+    # pre-llenado del control de cobertura del Escenario B)
+    fechas_detectadas: list[str] = []
+    idx_fecha = mapeo.get("fecha_emision")
+    if tipo_libro == "ventas" and idx_fecha is not None:
+        df_full = _leer_df(content, delimiter, encoding)
+        if df_full is not None and not df_full.empty and idx_fecha < len(df_full.columns):
+            if has_header:
+                df_full = df_full.iloc[1:]
+            fechas = _norm_date_series(
+                df_full.iloc[:, idx_fecha].fillna("").astype(str).str.strip()
+            )
+            fechas_detectadas = sorted(
+                {f for f in fechas.unique().tolist() if re.match(r"^\d{4}-\d{2}-\d{2}$", f)}
+            )
+
     return {
         "nivel": nivel,
         "formato": formato,
@@ -254,6 +270,7 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
         "campos": campos_de(tipo_libro),
         "validacion": validacion,
         "solo_lectura": solo_lectura,
+        "fechas_detectadas": fechas_detectadas,
     }
 
 

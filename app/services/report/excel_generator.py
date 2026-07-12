@@ -84,6 +84,7 @@ def generate_excel(
     periodo: str,
     tipo_libro: str,
     propuesta_generada: datetime | None = None,
+    cobertura: str | None = None,
 ) -> bytes:
     wb = Workbook()
 
@@ -115,6 +116,8 @@ def generate_excel(
         ("Periodo",       f"{periodo[:4]}/{periodo[4:]}"),
         ("Tipo de libro", "Ventas (RVIE)" if tipo_libro == "ventas" else "Compras (RCE)"),
     ]
+    if cobertura is not None:
+        datos.append(("Cobertura del archivo", cobertura))
     if propuesta_generada is not None:
         datos.append(("Propuesta SUNAT", f"generada el {propuesta_generada.astimezone().strftime('%d/%m/%Y %H:%M')}"))
     datos.append(("Generado", datetime.now().strftime("%d/%m/%Y %H:%M")))
