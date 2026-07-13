@@ -1,67 +1,55 @@
 """
-Endpoints para previsualización y configuración del mapeo de columnas
-del archivo TXT/CSV de la empresa.
+Endpoints del mapeo de columnas (sistema v2, por libro).
 
-Flujo en el frontend:
-  1. Usuario sube el archivo → POST /file-mapping/preview
-     Respuesta: filas en crudo + mapeo detectado + confianza
-  2. Usuario revisa y opcionalmente corrige → PUT /file-mapping/confirm
-     Si no necesita corregir, confirma el mapeo detectado.
-  3. En conciliaciones futuras el mapeo guardado se usa automáticamente.
+- /analizar : inspecciona un archivo → columnas + mapeo propuesto + validación.
+  Lo usan tanto la tarjeta de la conciliación como el apartado "Formato de archivo".
+- /validar  : re-valida un mapeo ajustado (aritmética + obligatorios).
+- /guardar  : guarda DELIBERADAMENTE el formato de la empresa (por libro).
+- /guardado : consulta / elimina el formato guardado.
+
+El guardado ya no es automático: una conciliación usa el formato guardado si
+existe, pero solo el apartado (o el checkbox explícito) lo persiste.
 """
 
-import io
-import re
-import pandas as pd
+import json
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy.orm import Session
 from app.core.database import get_db
-from app.api.deps import get_current_user, require_empresa_or_above, require_any_role
+from app.api.deps import require_any_role, require_empresa_or_above
 from app.models.user import User
 from app.models.file_mapping import CompanyFileMapping
-from app.services.parser.empresa_file import detect_mapping, ColumnMapping
 from app.services.parser.mapeo import analizar_archivo, validar_mapeo
-from app.schemas.file_mapping import FileMappingResponse, FileMappingManual, FilePreviewResponse
 
 router = APIRouter(prefix="/file-mapping", tags=["file-mapping"])
 
-MAX_SAMPLE_ROWS = 5
+_LIBROS = ("ventas", "compras")
 
 
-def _model_to_mapping(model: CompanyFileMapping) -> ColumnMapping:
-    m = ColumnMapping()
-    m.delimiter = model.delimiter
-    m.encoding = model.encoding
-    m.has_header = model.has_header
-    m.skip_rows = model.skip_rows
-    m.col_tipo_cdp = model.col_tipo_cdp
-    m.col_serie = model.col_serie
-    m.col_numero = model.col_numero
-    m.col_importe_total = model.col_importe_total
-    m.confidence = model.detection_confidence or 0.0
-    m.confirmed_by_user = model.confirmed_by_user
-    return m
+def _validar_libro(tipo_libro: str) -> None:
+    if tipo_libro not in _LIBROS:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tipo_libro inválido")
 
 
-def _get_sample_rows(content: bytes, mapping: ColumnMapping, n: int = MAX_SAMPLE_ROWS) -> list[list[str]]:
-    try:
-        text = content.decode(mapping.encoding, errors="replace")
-        df = pd.read_csv(
-            io.StringIO(text),
-            sep=re.escape(mapping.delimiter),
-            header=None,
-            skiprows=mapping.skip_rows,
-            dtype=str,
-            skip_blank_lines=True,
-            on_bad_lines="skip",
-            engine="python",
-            nrows=n + (1 if mapping.has_header else 0),
-        )
-        start = 1 if mapping.has_header else 0
-        rows = df.iloc[start:start + n].fillna("").values.tolist()
-        return [[str(v) for v in row] for row in rows]
-    except Exception:
-        return []
+def _mapping_to_config(m: CompanyFileMapping) -> dict:
+    return {
+        "delimiter": m.delimiter,
+        "encoding": m.encoding,
+        "has_header": m.has_header,
+        "skip_rows": m.skip_rows,
+        "serie_numero_combinado": m.serie_numero_combinado,
+        "columnas": m.columnas or {},
+    }
+
+
+def _saved_response(m: CompanyFileMapping | None) -> dict | None:
+    if not m or not m.columnas or not m.confirmed_by_user:
+        return None
+    return {
+        "tipo_libro": m.tipo_libro,
+        **_mapping_to_config(m),
+        "updated_at": m.updated_at.isoformat() if m.updated_at else None,
+    }
 
 
 @router.post("/analizar")
@@ -71,14 +59,10 @@ async def analizar(
     current_user: User = Depends(require_any_role),
     db: Session = Depends(get_db),
 ):
-    """
-    Analiza el archivo para la tarjeta de mapeo de la conciliación:
-    columnas con muestras + mapeo propuesto (según nivel detectado) + validación.
-    """
+    """Analiza un archivo: columnas con muestras + mapeo propuesto + validación."""
     if not current_user.company_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sin empresa asignada")
-    if tipo_libro not in ("ventas", "compras"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tipo_libro inválido")
+    _validar_libro(tipo_libro)
 
     content = await archivo.read()
     if not content:
@@ -88,18 +72,12 @@ async def analizar(
         CompanyFileMapping.company_id == current_user.company_id,
         CompanyFileMapping.tipo_libro == tipo_libro,
     ).first()
-    saved_config = None
-    if saved and saved.columnas and saved.confirmed_by_user:
-        saved_config = {
-            "delimiter": saved.delimiter,
-            "has_header": saved.has_header,
-            "serie_numero_combinado": saved.serie_numero_combinado,
-            "columnas": saved.columnas,
-        }
+    saved_config = _mapping_to_config(saved) if (saved and saved.columnas and saved.confirmed_by_user) else None
 
     resultado = analizar_archivo(content, tipo_libro, saved_config)
     if "error" in resultado:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=resultado["error"])
+    resultado["tiene_guardado"] = saved_config is not None
     return resultado
 
 
@@ -110,8 +88,8 @@ async def validar(
     archivo: UploadFile = File(...),
     current_user: User = Depends(require_any_role),
 ):
-    """Re-valida un mapeo ajustado por el usuario contra el archivo (aritmética + obligatorios)."""
-    import json
+    """Re-valida un mapeo ajustado contra el archivo (aritmética + obligatorios)."""
+    _validar_libro(tipo_libro)
     try:
         cfg = json.loads(config)
     except json.JSONDecodeError:
@@ -120,120 +98,90 @@ async def validar(
     return validar_mapeo(content, cfg, tipo_libro)
 
 
-@router.post("/preview", response_model=FilePreviewResponse)
-async def preview_file(
+def _guardar_config(db: Session, company_id: int, tipo_libro: str, cfg: dict) -> CompanyFileMapping:
+    saved = db.query(CompanyFileMapping).filter(
+        CompanyFileMapping.company_id == company_id,
+        CompanyFileMapping.tipo_libro == tipo_libro,
+    ).first()
+    if not saved:
+        saved = CompanyFileMapping(company_id=company_id, tipo_libro=tipo_libro)
+        db.add(saved)
+    saved.delimiter = cfg.get("delimiter", "|")
+    saved.encoding = cfg.get("encoding", "latin-1")
+    saved.has_header = bool(cfg.get("has_header", False))
+    saved.skip_rows = int(cfg.get("skip_rows", 0))
+    saved.columnas = cfg.get("columnas") or {}
+    saved.serie_numero_combinado = bool(cfg.get("serie_numero_combinado", False))
+    saved.confirmed_by_user = True
+    saved.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(saved)
+    return saved
+
+
+@router.post("/guardar")
+async def guardar(
+    tipo_libro: str = Form(...),
+    config: str = Form(...),
     archivo: UploadFile = File(...),
     current_user: User = Depends(require_empresa_or_above),
     db: Session = Depends(get_db),
 ):
     """
-    Paso 1: Analiza el archivo sin guardar nada.
-    Devuelve el mapeo detectado + filas de muestra para que el usuario pueda
-    revisar y confirmar (o corregir) desde el frontend.
+    Guarda deliberadamente el formato de la empresa para un libro.
+    Valida la aritmética contra la muestra antes de persistir.
     """
     if not current_user.company_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sin empresa asignada")
+    _validar_libro(tipo_libro)
+    try:
+        cfg = json.loads(config)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="config no es JSON válido")
 
     content = await archivo.read()
-
-    saved = db.query(CompanyFileMapping).filter(
-        CompanyFileMapping.company_id == current_user.company_id
-    ).first()
-
-    if saved and saved.confirmed_by_user:
-        existing_mapping = _model_to_mapping(saved)
-        sample = _get_sample_rows(content, existing_mapping)
-        return FilePreviewResponse(
-            detected_mapping=FileMappingResponse.model_validate(saved),
-            sample_rows=sample,
-            total_rows_detected=len(sample),
-            confidence=saved.detection_confidence or 1.0,
-            warnings=["Usando mapeo guardado y confirmado previamente."],
-            already_confirmed=True,
+    val = validar_mapeo(content, cfg, tipo_libro)
+    if not val["ok"]:
+        detalle = "; ".join(val["avisos"]) if val["avisos"] else f"faltan campos: {val['faltantes']}"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"El mapeo no supera la validación: {detalle}",
         )
 
-    detected = detect_mapping(content, archivo.filename or "")
-    sample = _get_sample_rows(content, detected)
-
-    return FilePreviewResponse(
-        detected_mapping=FileMappingResponse(
-            delimiter=detected.delimiter,
-            encoding=detected.encoding,
-            has_header=detected.has_header,
-            skip_rows=detected.skip_rows,
-            col_tipo_cdp=detected.col_tipo_cdp,
-            col_serie=detected.col_serie,
-            col_numero=detected.col_numero,
-            col_importe_total=detected.col_importe_total,
-            confidence=detected.confidence,
-            confirmed_by_user=False,
-            updated_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
-            sample_rows=None,
-        ),
-        sample_rows=sample,
-        total_rows_detected=len(sample),
-        confidence=detected.confidence,
-        warnings=detected.warnings,
-        already_confirmed=False,
-    )
+    saved = _guardar_config(db, current_user.company_id, tipo_libro, cfg)
+    return _saved_response(saved)
 
 
-@router.put("/confirm", response_model=FileMappingResponse)
-def confirm_mapping(
-    payload: FileMappingManual,
-    current_user: User = Depends(require_empresa_or_above),
+@router.get("/guardado")
+def get_guardado(
+    tipo_libro: str,
+    current_user: User = Depends(require_any_role),
     db: Session = Depends(get_db),
 ):
-    """
-    Paso 2: El usuario confirma (o corrige) el mapeo detectado.
-    Se guarda en DB para usarse en conciliaciones futuras.
-    """
-    if not current_user.company_id:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Sin empresa asignada")
-
-    saved = db.query(CompanyFileMapping).filter(
-        CompanyFileMapping.company_id == current_user.company_id
-    ).first()
-
-    data = payload.model_dump()
-    data["confirmed_by_user"] = True
-
-    if saved:
-        for k, v in data.items():
-            setattr(saved, k, v)
-    else:
-        saved = CompanyFileMapping(company_id=current_user.company_id, **data)
-        db.add(saved)
-
-    db.commit()
-    db.refresh(saved)
-    return FileMappingResponse.model_validate(saved)
-
-
-@router.get("/", response_model=FileMappingResponse | None)
-def get_my_mapping(
-    current_user: User = Depends(require_empresa_or_above),
-    db: Session = Depends(get_db),
-):
-    """Devuelve el mapeo guardado actual de la empresa, si existe."""
+    """Devuelve el formato guardado de la empresa para un libro, o null."""
+    _validar_libro(tipo_libro)
     if not current_user.company_id:
         return None
     saved = db.query(CompanyFileMapping).filter(
-        CompanyFileMapping.company_id == current_user.company_id
+        CompanyFileMapping.company_id == current_user.company_id,
+        CompanyFileMapping.tipo_libro == tipo_libro,
     ).first()
-    return FileMappingResponse.model_validate(saved) if saved else None
+    return _saved_response(saved)
 
 
-@router.delete("/", status_code=status.HTTP_204_NO_CONTENT)
-def reset_mapping(
+@router.delete("/guardado", status_code=status.HTTP_204_NO_CONTENT)
+def delete_guardado(
+    tipo_libro: str,
     current_user: User = Depends(require_empresa_or_above),
     db: Session = Depends(get_db),
 ):
-    """Elimina el mapeo guardado para forzar re-detección en la próxima carga."""
+    """Elimina el formato guardado de la empresa para un libro."""
+    _validar_libro(tipo_libro)
     if not current_user.company_id:
         return
     saved = db.query(CompanyFileMapping).filter(
-        CompanyFileMapping.company_id == current_user.company_id
+        CompanyFileMapping.company_id == current_user.company_id,
+        CompanyFileMapping.tipo_libro == tipo_libro,
     ).first()
     if saved:
         db.delete(saved)

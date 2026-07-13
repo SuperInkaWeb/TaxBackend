@@ -169,53 +169,54 @@ async def _run_reconciliation_task(
         # semáforo): un job en cola no retiene el archivo en RAM mientras espera.
         empresa_content = await asyncio.to_thread(storage.read, empresa_file_path)
 
-        config = mapeo_config
-        if config is None:
-            saved_model = db.query(CompanyFileMapping).filter(
-                CompanyFileMapping.company_id == company_id,
-                CompanyFileMapping.tipo_libro == tipo_libro.value,
-            ).first()
-            if saved_model and saved_model.columnas and saved_model.confirmed_by_user:
-                config = {
-                    "delimiter": saved_model.delimiter,
-                    "encoding": saved_model.encoding,
-                    "has_header": saved_model.has_header,
-                    "skip_rows": saved_model.skip_rows,
-                    "serie_numero_combinado": saved_model.serie_numero_combinado,
-                    "columnas": saved_model.columnas,
-                }
+        # Prioridad de formato (coincide con la del análisis del frontend):
+        #   1. Mapeo explícito de la tarjeta (one-off): el usuario lo confirmó.
+        #   2. Auto-detección estándar (PLE / plataforma): gana sobre el guardado
+        #      → un PLE siempre se detecta como PLE aunque haya formato guardado.
+        #   3. Formato guardado de la empresa (solo si no es estándar).
+        #   4. Rechazo con mensaje.
+        formato_esperado = (
+            PLE81_FORMAT_HELP if tipo_libro == TipoLibro.compras
+            else f"CSV con las columnas: {KNOWN_FORMAT_COLUMNS_HELP}"
+        )
 
-        if config is not None:
+        async def _parse_con(config: dict) -> list:
             val = await asyncio.to_thread(validar_mapeo, empresa_content, config, tipo_libro.value)
             if not val["ok"]:
                 detalle = "; ".join(val["avisos"]) if val["avisos"] else f"faltan campos: {val['faltantes']}"
                 raise ValueError(f"El mapeo de columnas no supera la validación: {detalle}")
-            empresa_records = await asyncio.to_thread(
-                parse_con_columnas, empresa_content, config, tipo_libro.value
-            )
-            if not empresa_records:
+            recs = await asyncio.to_thread(parse_con_columnas, empresa_content, config, tipo_libro.value)
+            if not recs:
                 raise ValueError("No se extrajo ningún registro con el mapeo de columnas configurado.")
+            return recs
+
+        if mapeo_config is not None:
+            empresa_records = await _parse_con(mapeo_config)
         else:
             empresa_records, used_mapping = await asyncio.to_thread(
                 parse_empresa_file, empresa_content, empresa_filename, None, tipo_libro.value
             )
-
-            formato_esperado = (
-                PLE81_FORMAT_HELP if tipo_libro == TipoLibro.compras
-                else f"CSV con las columnas: {KNOWN_FORMAT_COLUMNS_HELP}"
-            )
-
-            if not empresa_records:
-                detalle = "; ".join(used_mapping.warnings) or "no se extrajo ningún registro"
-                raise ValueError(
-                    f"No se pudo procesar el archivo. {detalle}. Formato esperado: {formato_esperado}."
-                )
-
             if not used_mapping.known_format:
-                raise ValueError(
-                    f"El archivo no tiene el formato esperado para {tipo_libro.value}. "
-                    f"Formato esperado: {formato_esperado}."
-                )
+                # No es formato estándar → probar el formato guardado de la empresa.
+                saved_model = db.query(CompanyFileMapping).filter(
+                    CompanyFileMapping.company_id == company_id,
+                    CompanyFileMapping.tipo_libro == tipo_libro.value,
+                ).first()
+                if saved_model and saved_model.columnas and saved_model.confirmed_by_user:
+                    empresa_records = await _parse_con({
+                        "delimiter": saved_model.delimiter,
+                        "encoding": saved_model.encoding,
+                        "has_header": saved_model.has_header,
+                        "skip_rows": saved_model.skip_rows,
+                        "serie_numero_combinado": saved_model.serie_numero_combinado,
+                        "columnas": saved_model.columnas,
+                    })
+                else:
+                    detalle = "; ".join(used_mapping.warnings) or "formato no reconocido"
+                    raise ValueError(
+                        f"El archivo no tiene el formato esperado para {tipo_libro.value}. "
+                        f"{detalle}. Formato esperado: {formato_esperado}."
+                    )
 
         async def get_token(force_refresh: bool = False) -> str:
             return await get_sunat_token(company_id, creds, company.ruc, force_refresh)
@@ -368,6 +369,7 @@ async def run_reconciliation(
     archivo: UploadFile = File(..., description="Archivo TXT o CSV de la empresa"),
     reutilizar_propuesta: bool = Form(False, description="Reutilizar propuesta SUNAT fresca si existe"),
     mapeo_columnas: str | None = Form(None, description="JSON del mapeo de columnas confirmado por el usuario"),
+    guardar_formato: bool = Form(False, description="Guardar el mapeo como formato de la empresa para futuras conciliaciones"),
     cobertura_fechas: str | None = Form(
         None,
         description="JSON array de fechas AAAA-MM-DD que el archivo declara cubrir (solo ventas). Array vacío = mes completo.",
@@ -418,21 +420,24 @@ async def run_reconciliation(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="mapeo_columnas no es un JSON válido",
             )
-        saved = db.query(CompanyFileMapping).filter(
-            CompanyFileMapping.company_id == company.id,
-            CompanyFileMapping.tipo_libro == tipo_libro.value,
-        ).first()
-        if not saved:
-            saved = CompanyFileMapping(company_id=company.id, tipo_libro=tipo_libro.value)
-            db.add(saved)
-        saved.delimiter = mapeo_config.get("delimiter", "|")
-        saved.encoding = mapeo_config.get("encoding", "latin-1")
-        saved.has_header = bool(mapeo_config.get("has_header", False))
-        saved.skip_rows = int(mapeo_config.get("skip_rows", 0))
-        saved.columnas = mapeo_config.get("columnas") or {}
-        saved.serie_numero_combinado = bool(mapeo_config.get("serie_numero_combinado", False))
-        saved.confirmed_by_user = True
-        db.commit()
+        # El mapeo de la tarjeta se usa solo para ESTA conciliación (one-off).
+        # Solo persiste si el usuario marca explícitamente "guardar_formato".
+        if guardar_formato and mapeo_config.get("columnas"):
+            saved = db.query(CompanyFileMapping).filter(
+                CompanyFileMapping.company_id == company.id,
+                CompanyFileMapping.tipo_libro == tipo_libro.value,
+            ).first()
+            if not saved:
+                saved = CompanyFileMapping(company_id=company.id, tipo_libro=tipo_libro.value)
+                db.add(saved)
+            saved.delimiter = mapeo_config.get("delimiter", "|")
+            saved.encoding = mapeo_config.get("encoding", "latin-1")
+            saved.has_header = bool(mapeo_config.get("has_header", False))
+            saved.skip_rows = int(mapeo_config.get("skip_rows", 0))
+            saved.columnas = mapeo_config.get("columnas") or {}
+            saved.serie_numero_combinado = bool(mapeo_config.get("serie_numero_combinado", False))
+            saved.confirmed_by_user = True
+            db.commit()
 
     job = ReconciliationJob(
         company_id=company.id,
