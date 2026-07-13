@@ -240,19 +240,33 @@ def generate_excel(
 
     es_compras = tipo_libro == "compras"
 
+    # La columna "Estado" (ventas) solo se muestra si el formato la aporta
+    # (CSV del POS). En PLE 14.1 o mapeos sin estado, se omite para no dejar
+    # una columna vacía.
+    hay_estado = not es_compras and any(
+        (rec.status_description or "").strip() for rec in output.scenario_a
+    )
+
     ws_a = wb.create_sheet("A - Solo en tu archivo")
     if es_compras:
         _set_header_row(ws_a, [
             "Tipo", "Serie", "Número", "Fecha emisión", "RUC Proveedor", "Proveedor",
             "Base imponible", "IGV", "Importe total", "Alerta",
         ])
-    else:
+        col_alerta_a = 10
+    elif hay_estado:
         _set_header_row(ws_a, [
             "Tipo", "Serie", "Número", "Fecha emisión",
             "Base imponible", "IGV", "Importe total", "Estado (tu archivo)", "Alerta",
         ])
+        col_alerta_a = 9
+    else:
+        _set_header_row(ws_a, [
+            "Tipo", "Serie", "Número", "Fecha emisión",
+            "Base imponible", "IGV", "Importe total", "Alerta",
+        ])
+        col_alerta_a = 8
     use_fmt_a = cnt_a <= EXCEL_FORMAT_LIMIT
-    col_alerta_a = 10 if es_compras else 9
     for row_idx, rec in enumerate(output.scenario_a, 2):
         if es_compras:
             values = [
@@ -261,18 +275,24 @@ def generate_excel(
                 rec.base_imponible, rec.igv, rec.importe_total,
                 "ROJO" if rec.es_alerta_roja else "ÁMBAR",
             ]
-        else:
+        elif hay_estado:
             values = [
                 rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
                 rec.base_imponible, rec.igv, rec.importe_total,
                 rec.status_description,
                 "ROJO" if rec.es_alerta_roja else "ÁMBAR",
             ]
+        else:
+            values = [
+                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
+                rec.base_imponible, rec.igv, rec.importe_total,
+                "ROJO" if rec.es_alerta_roja else "ÁMBAR",
+            ]
         for col_idx, val in enumerate(values, 1):
             cell = ws_a.cell(row=row_idx, column=col_idx, value=val)
             if use_fmt_a:
                 cell.border = THIN_BORDER
-                if not es_compras and col_idx == 8 and "RECHAZ" in str(val).upper():
+                if hay_estado and col_idx == 8 and "RECHAZ" in str(val).upper():
                     cell.font = Font(bold=True, color="9C0006")
                 elif col_idx == col_alerta_a:
                     _alert_style(cell, rec.es_alerta_roja)
