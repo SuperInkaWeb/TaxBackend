@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.responses import Response
 from pydantic import ValidationError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.core.config import settings
 from app.core.database import get_db, SessionLocal
 from app.api.deps import get_current_user, require_any_role
@@ -509,10 +509,17 @@ async def resume_reconciliation(
 
 @router.get("/", response_model=list[ReconciliationJobResponse])
 def list_jobs(
+    limit: int = 100,
+    offset: int = 0,
     current_user: User = Depends(require_any_role),
     db: Session = Depends(get_db),
 ):
-    query = db.query(ReconciliationJob)
+    # joinedload evita el N+1: _build_response accede a result y report_file
+    # de cada job; sin esto sería 1 query extra por fila.
+    query = db.query(ReconciliationJob).options(
+        joinedload(ReconciliationJob.result),
+        joinedload(ReconciliationJob.report_file),
+    )
 
     if current_user.role in (UserRole.superadmin, UserRole.admin):
         pass
@@ -522,7 +529,15 @@ def list_jobs(
     if current_user.role == UserRole.usuario:
         query = query.filter(ReconciliationJob.created_by_id == current_user.id)
 
-    jobs = query.order_by(ReconciliationJob.created_at.desc()).all()
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
+    jobs = (
+        query.order_by(ReconciliationJob.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     return [_build_response(job) for job in jobs]
 
 
