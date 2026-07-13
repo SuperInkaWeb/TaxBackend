@@ -64,14 +64,44 @@ def test_analizar_detecta_nivel_desconocido_para_csv_generico():
     assert res["solo_lectura"] is False
 
 
-def test_plataforma_es_solo_lectura():
+def test_plataforma_mapea_estado_y_es_editable():
     """
-    El CSV del POS conocido es formato de fábrica: solo lectura, para que la
-    conciliación use su lector dedicado (que lee el estado del comprobante).
+    El CSV del POS incluye el estado en su mapeo y sigue siendo editable:
+    el parser genérico debe leer el estado igual que el lector dedicado.
     """
     filas = ["type description;number;issued date;amount net;amount tax;amount total;status description"]
-    filas += [f"Boleta;B001-{100 + i};04/05/2026;100.00;18.00;118.00;Aceptado" for i in range(5)]
+    filas += [f"Boleta;B001-{100 + i};04/05/2026;100.00;18.00;118.00;Rechazado" for i in range(5)]
     content = ("\n".join(filas) + "\n").encode("latin-1")
     res = analizar_archivo(content, "ventas")
     assert res["nivel"] == "plataforma"
-    assert res["solo_lectura"] is True
+    assert res["solo_lectura"] is False
+    assert res["config"]["columnas"].get("status_description") == 6
+
+    recs = parse_con_columnas(content, res["config"], "ventas")
+    assert len(recs) == 5
+    assert all(r.status_description == "Rechazado" for r in recs)
+
+
+def test_estado_mapeable_en_formato_propio():
+    """Empresa con formato propio puede mapear su columna de estado (opcional)."""
+    filas = ["Fecha;Tipo;Serie;Numero;Base;IGV;Total;Estado"]
+    filas += [f"04/05/2026;01;F001;{i};100.00;18.00;118.00;ANULADO" for i in range(1, 5)]
+    content = ("\n".join(filas) + "\n").encode("latin-1")
+    config = {
+        "delimiter": ";", "encoding": "latin-1", "has_header": True, "skip_rows": 0,
+        "serie_numero_combinado": False,
+        "columnas": {
+            "fecha_emision": 0, "tipo_cdp": 1, "serie": 2, "numero": 3,
+            "base_imponible": 4, "igv": 5, "importe_total": 6,
+            "status_description": 7,
+        },
+    }
+    assert validar_mapeo(content, config, "ventas")["ok"]
+    recs = parse_con_columnas(content, config, "ventas")
+    assert all(r.status_description == "ANULADO" for r in recs)
+
+
+def test_estado_ausente_no_es_obligatorio():
+    """Empresa sin columna de estado: el mapeo valida igual (campo opcional)."""
+    res = analizar_archivo(_csv_ventas(), "ventas")
+    assert "status_description" not in res["config"]["columnas"]

@@ -43,6 +43,7 @@ CAMPOS_VENTAS = [
     {"campo": "importe_total",  "etiqueta": "Importe total",        "obligatorio": True},
     {"campo": "mto_exonerado",  "etiqueta": "Exonerado",            "obligatorio": False},
     {"campo": "mto_inafecto",   "etiqueta": "Inafecto",             "obligatorio": False},
+    {"campo": "status_description", "etiqueta": "Estado del comprobante", "obligatorio": False},
 ]
 
 CAMPOS_COMPRAS = [
@@ -94,6 +95,7 @@ _PLATAFORMA_A_CAMPO = {
     "importe_total":  "amount total",
     "mto_exonerado":  "amount exo",
     "mto_inafecto":   "amount ina",
+    "status_description": "status description",
 }
 
 _ALIAS_HEADER = {
@@ -113,6 +115,7 @@ _ALIAS_HEADER = {
     "valor_adq_ng":   ["no gravad", "ng"],
     "moneda":         ["moneda", "currency", "divisa"],
     "tipo_cambio":    ["cambio", "tc", "exchange"],
+    "status_description": ["status description", "estado", "status"],
 }
 
 _FECHA_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$|^\d{4}-\d{2}-\d{2}$")
@@ -194,8 +197,6 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
         if tipo_libro == "ventas" and has_header and _KNOWN_FORMAT_REQUIRED.issubset(set(headers_norm)):
             nivel = "plataforma"
             combinado = True
-            solo_lectura = True
-            formato = "CSV de plataforma reconocida"
             for campo, header in _PLATAFORMA_A_CAMPO.items():
                 if header in headers_norm:
                     mapeo[campo] = headers_norm.index(header)
