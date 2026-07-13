@@ -37,4 +37,3 @@ class User(Base):
 
     company: Mapped["Company"] = relationship("Company", back_populates="users", foreign_keys=[company_id])
     reconciliation_jobs: Mapped[list["ReconciliationJob"]] = relationship("ReconciliationJob", back_populates="created_by_user")
-    audit_logs: Mapped[list["AuditLog"]] = relationship("AuditLog", back_populates="user")
