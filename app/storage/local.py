@@ -25,3 +25,6 @@ class LocalStorage(BaseStorage):
         full_path = self.base_path / storage_path
         if full_path.exists():
             full_path.unlink()
+
+    def exists(self, storage_path: str) -> bool:
+        return (self.base_path / storage_path).exists()

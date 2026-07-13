@@ -17,3 +17,7 @@ class BaseStorage(ABC):
     @abstractmethod
     def delete(self, storage_path: str) -> None:
         """Elimina el archivo si existe."""
+
+    @abstractmethod
+    def exists(self, storage_path: str) -> bool:
+        """Indica si el archivo existe, sin leerlo."""

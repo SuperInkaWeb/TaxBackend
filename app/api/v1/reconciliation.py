@@ -130,7 +130,7 @@ def _buscar_ticket_fresco(
 
 async def _run_reconciliation_task(
     job_id: int,
-    empresa_content: bytes,
+    empresa_file_path: str,
     empresa_filename: str,
     company_id: int,
     periodo: str,
@@ -163,6 +163,10 @@ async def _run_reconciliation_task(
 
         job.status = JobStatus.procesando
         db.commit()
+
+        # Los bytes del archivo se leen recién ahora (ya con el turno del
+        # semáforo): un job en cola no retiene el archivo en RAM mientras espera.
+        empresa_content = await asyncio.to_thread(storage.read, empresa_file_path)
 
         config = mapeo_config
         if config is None:
@@ -436,10 +440,13 @@ async def run_reconciliation(
     job.empresa_file_path = upload_path
     db.commit()
 
+    # Liberar los bytes del request: la tarea los releerá del disco en su turno.
+    del empresa_content
+
     background_tasks.add_task(
         _run_reconciliation_task,
         job.id,
-        empresa_content,
+        upload_path,
         archivo.filename or "",
         company.id,
         periodo,
@@ -481,9 +488,8 @@ async def resume_reconciliation(
             detail="Este job no es reanudable (no se conservó el archivo de la empresa)",
         )
 
-    try:
-        empresa_content = storage.read(job.empresa_file_path)
-    except Exception:
+    # Confirmar que el archivo sigue en disco sin cargarlo a RAM (la tarea lo lee en su turno).
+    if not storage.exists(job.empresa_file_path):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El archivo de la empresa ya no está disponible. Crea una conciliación nueva.",
@@ -496,7 +502,7 @@ async def resume_reconciliation(
     background_tasks.add_task(
         _run_reconciliation_task,
         job.id,
-        empresa_content,
+        job.empresa_file_path,
         job.empresa_filename or "",
         job.company_id,
         job.periodo,
