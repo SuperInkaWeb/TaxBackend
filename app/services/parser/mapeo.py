@@ -118,6 +118,9 @@ _ALIAS_HEADER = {
 _FECHA_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$|^\d{4}-\d{2}-\d{2}$")
 _RUC_RE = re.compile(r"^\d{11}$")
 _MONTO_RE = re.compile(r"^-?\d+([.,]\d{1,4})?$")
+# Serie-número combinado en una sola columna: letra + alfanumérico + "-" + dígitos.
+# Ej: "B052-01672972", "F001-123", "E001-892". No matchea fechas (usan "/").
+_SERIE_NUM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{1,5}-\d{1,12}$")
 
 
 def campos_de(tipo_libro: str) -> list[dict]:
@@ -293,6 +296,7 @@ def _sugerir(content: bytes, delimiter: str, encoding: str, has_header: bool,
                     usadas.add(hit)
                     break
 
+    combinado = False
     df = _leer_df(content, delimiter, encoding, nrows=40)
     if df is not None and not df.empty:
         start = 1 if has_header else 0
@@ -310,8 +314,15 @@ def _sugerir(content: bytes, delimiter: str, encoding: str, has_header: bool,
             elif tipo_libro == "compras" and "ruc_proveedor" not in mapeo and rate(_RUC_RE) > 0.9:
                 mapeo["ruc_proveedor"] = i
                 usadas.add(i)
+            elif "numero" not in mapeo and rate(_SERIE_NUM_RE) > 0.9:
+                # La columna trae serie y número juntos ("F001-123"):
+                # se asigna a Número y se pre-marca el modo combinado.
+                mapeo["numero"] = i
+                usadas.add(i)
+                combinado = True
+                mapeo.pop("serie", None)  # la serie sale de esta misma columna
 
-    return mapeo, False
+    return mapeo, combinado
 
 
 def parse_con_columnas(content: bytes, config: dict, tipo_libro: str) -> list[EmpresaRecord]:
