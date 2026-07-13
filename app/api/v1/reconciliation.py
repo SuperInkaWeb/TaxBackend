@@ -76,9 +76,6 @@ def _build_response(job: ReconciliationJob) -> ReconciliationJobResponse:
 
 TICKET_FRESCURA_HORAS = 24
 
-# Cola de jobs: cada conciliación pica ~10GB de RAM. El semáforo serializa el
-# trabajo pesado para que N jobs simultáneos no revienten el servidor (OOM).
-# Los que esperan permanecen en estado 'en_cola'. Concurrencia configurable.
 _job_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_JOBS)
 
 
@@ -165,16 +162,8 @@ async def _run_reconciliation_task(
         job.status = JobStatus.procesando
         db.commit()
 
-        # Los bytes del archivo se leen recién ahora (ya con el turno del
-        # semáforo): un job en cola no retiene el archivo en RAM mientras espera.
         empresa_content = await asyncio.to_thread(storage.read, empresa_file_path)
 
-        # Prioridad de formato (coincide con la del análisis del frontend):
-        #   1. Mapeo explícito de la tarjeta (one-off): el usuario lo confirmó.
-        #   2. Auto-detección estándar (PLE / plataforma): gana sobre el guardado
-        #      → un PLE siempre se detecta como PLE aunque haya formato guardado.
-        #   3. Formato guardado de la empresa (solo si no es estándar).
-        #   4. Rechazo con mensaje.
         formato_esperado = (
             PLE81_FORMAT_HELP if tipo_libro == TipoLibro.compras
             else f"CSV con las columnas: {KNOWN_FORMAT_COLUMNS_HELP}"
@@ -197,7 +186,6 @@ async def _run_reconciliation_task(
                 parse_empresa_file, empresa_content, empresa_filename, None, tipo_libro.value
             )
             if not used_mapping.known_format:
-                # No es formato estándar → probar el formato guardado de la empresa.
                 saved_model = db.query(CompanyFileMapping).filter(
                     CompanyFileMapping.company_id == company_id,
                     CompanyFileMapping.tipo_libro == tipo_libro.value,
@@ -336,10 +324,7 @@ async def _run_reconciliation_task(
         db.commit()
 
     except Exception as exc:
-        # Traceback completo solo a los logs del servidor (no al usuario).
         logger.exception("Job de conciliación #%s falló", job_id)
-        # Los ValueError son errores controlados con mensaje en español para el
-        # usuario; cualquier otra excepción muestra un mensaje genérico.
         if isinstance(exc, ValueError):
             mensaje = str(exc)
         else:
@@ -420,8 +405,6 @@ async def run_reconciliation(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="mapeo_columnas no es un JSON válido",
             )
-        # El mapeo de la tarjeta se usa solo para ESTA conciliación (one-off).
-        # Solo persiste si el usuario marca explícitamente "guardar_formato".
         if guardar_formato and mapeo_config.get("columnas"):
             saved = db.query(CompanyFileMapping).filter(
                 CompanyFileMapping.company_id == company.id,
@@ -456,7 +439,6 @@ async def run_reconciliation(
     job.empresa_file_path = upload_path
     db.commit()
 
-    # Liberar los bytes del request: la tarea los releerá del disco en su turno.
     del empresa_content
 
     background_tasks.add_task(
@@ -504,7 +486,6 @@ async def resume_reconciliation(
             detail="Este job no es reanudable (no se conservó el archivo de la empresa)",
         )
 
-    # Confirmar que el archivo sigue en disco sin cargarlo a RAM (la tarea lo lee en su turno).
     if not storage.exists(job.empresa_file_path):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -536,8 +517,6 @@ def list_jobs(
     current_user: User = Depends(require_any_role),
     db: Session = Depends(get_db),
 ):
-    # joinedload evita el N+1: _build_response accede a result y report_file
-    # de cada job; sin esto sería 1 query extra por fila.
     query = db.query(ReconciliationJob).options(
         joinedload(ReconciliationJob.result),
         joinedload(ReconciliationJob.report_file),

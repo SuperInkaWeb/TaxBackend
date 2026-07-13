@@ -19,8 +19,8 @@ def test_detecta_serie_numero_combinado_por_contenido():
     cfg = res["config"]
     assert cfg["serie_numero_combinado"] is True
     assert "numero" in cfg["columnas"]
-    assert cfg["columnas"]["numero"] == 2   # la columna "Comprobante"
-    assert "serie" not in cfg["columnas"]   # la serie sale de la combinada
+    assert cfg["columnas"]["numero"] == 2
+    assert "serie" not in cfg["columnas"]
 
 
 def test_numero_separado_no_marca_combinado():

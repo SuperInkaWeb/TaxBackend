@@ -38,7 +38,7 @@ def test_mapeo_columnas_corridas_falla_aritmetica():
         "serie_numero_combinado": False,
         "columnas": {
             "fecha_emision": 0, "tipo_cdp": 1, "serie": 2, "numero": 3,
-            "base_imponible": 3, "igv": 2, "importe_total": 6,  # corridas a propósito
+            "base_imponible": 3, "igv": 2, "importe_total": 6,
         },
     }
     val = validar_mapeo(content, config, "ventas")
@@ -50,7 +50,7 @@ def test_mapeo_falta_obligatorio_lo_reporta():
     config = {
         "delimiter": ";", "encoding": "latin-1", "has_header": True, "skip_rows": 0,
         "serie_numero_combinado": False,
-        "columnas": {"fecha_emision": 0, "tipo_cdp": 1, "serie": 2},  # faltan varios
+        "columnas": {"fecha_emision": 0, "tipo_cdp": 1, "serie": 2},
     }
     val = validar_mapeo(content, config, "ventas")
     assert not val["ok"]

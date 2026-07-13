@@ -33,7 +33,6 @@ def test_mapeo_guardado_ajeno_no_aplica_al_ple():
     que ese mapeo se use: el PLE se detecta antes de recurrir al guardado.
     """
     txt = _ple_compras()
-    # Simula un mapeo guardado con columnas equivocadas para el PLE:
     config_ajeno = {
         "delimiter": "|", "encoding": "latin-1", "has_header": False, "skip_rows": 0,
         "serie_numero_combinado": False,
@@ -42,9 +41,7 @@ def test_mapeo_guardado_ajeno_no_aplica_al_ple():
             "ruc_proveedor": 11, "base_imponible": 0, "igv": 1, "importe_total": 2,
         },
     }
-    # Aplicado directo, ese mapeo NO valida (aritmética no cuadra):
     val = validar_mapeo(txt, config_ajeno, "compras")
     assert not val["ok"]
-    # Pero la auto-detección reconoce el PLE correctamente, sin tocar el guardado:
     recs, mapping = parse_empresa_file(txt, "x.txt", None, "compras")
     assert mapping.known_format and len(recs) == 3

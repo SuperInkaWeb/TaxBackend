@@ -8,8 +8,6 @@ from app.services.parser.empresa_file import (
 )
 
 
-# ---------- Normalización de tipo de comprobante ----------
-
 def test_normaliza_prefijo_pe():
     assert _normalize_tipo_cdp("PE03") == "03"
 
@@ -38,8 +36,6 @@ def test_codigos_de_dos_digitos_no_cambian():
     assert _normalize_tipo_cdp("50") == "50"
 
 
-# ---------- Construcción de líneas PLE sintéticas ----------
-
 def _linea_ple_compras(serie="E001", numero="892", ruc="20605019031",
                        bi=100.0, igv=18.0, total=118.0, fecha="24/09/2025"):
     c = [""] * 42
@@ -59,8 +55,6 @@ def _linea_ple_ventas(serie="F001", numero="100", bi=100.0, igv=18.0,
     c[25] = "PEN"; c[26] = "1.000"
     return "|".join(c) + "|"
 
-
-# ---------- Detección y aritmética PLE compras ----------
 
 def test_ple_compras_valido_se_parsea():
     txt = ("\n".join(_linea_ple_compras(numero=str(i)) for i in range(1, 4)) + "\n").encode("latin-1")
@@ -86,8 +80,6 @@ def test_ple_ventas_valido_se_parsea():
     assert recs is not None and len(recs) == 3
     assert recs[0].base_imponible == 100.0 and recs[0].igv == 18.0
 
-
-# ---------- Guards de libro cruzado ----------
 
 def test_ple_ventas_subido_a_compras_se_rechaza():
     txt = ("\n".join(_linea_ple_ventas(numero=str(i)) for i in range(1, 4)) + "\n").encode("latin-1")

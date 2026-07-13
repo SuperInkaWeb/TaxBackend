@@ -182,13 +182,6 @@ def reconcile(
     csv_duplicados   = len(conciliables) - len(empresa_index)
     sunat_duplicados = len(sunat_records) - len(sunat_index)
 
-    # Filtro de fechas del Escenario B:
-    # - compras: nunca — el PLE es el registro íntegro del periodo y las fechas
-    #   de emisión están dispersas por meses (filtrar ocultaría crédito fiscal).
-    # - ventas con cobertura DECLARADA: usa ese conjunto (set vacío = mes
-    #   completo, sin filtro). Incluye días declarados aunque el archivo no
-    #   traiga filas de ese día — así los huecos aparecen en B.
-    # - ventas sin declaración (legacy/API): fechas presentes en el archivo.
     if es_compras:
         csv_dates: set[str] = set()
     elif cobertura_fechas is not None:

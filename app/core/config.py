@@ -13,8 +13,6 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_HOURS: int = 8
 
-    # Jobs de conciliación pesados (pico ~10GB RAM c/u). 1 = serializado.
-    # Subir solo si el servidor tiene RAM para N picos simultáneos.
     MAX_CONCURRENT_JOBS: int = 1
 
     ENCRYPTION_KEY: str

@@ -118,8 +118,6 @@ _ALIAS_HEADER = {
 _FECHA_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$|^\d{4}-\d{2}-\d{2}$")
 _RUC_RE = re.compile(r"^\d{11}$")
 _MONTO_RE = re.compile(r"^-?\d+([.,]\d{1,4})?$")
-# Serie-número combinado en una sola columna: letra + alfanumérico + "-" + dígitos.
-# Ej: "B052-01672972", "F001-123", "E001-892". No matchea fechas (usan "/").
 _SERIE_NUM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{1,5}-\d{1,12}$")
 
 
@@ -165,7 +163,6 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
     solo_lectura = False
     formato = None
 
-    # Nivel 1 ventas: PLE 14.1 (parser dedicado — pliega descuentos, aritmética completa)
     if tipo_libro == "ventas" and _try_parse_as_ple_ventas(content) is not None:
         delimiter, has_header = "|", False
         nivel = "ple"
@@ -173,7 +170,6 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
         combinado = False
         solo_lectura = True
         formato = "PLE 14.1 — Registro de Ventas"
-    # Nivel 1 compras: PLE 8.1
     elif tipo_libro == "compras" and es_ple_compras(content):
         delimiter, has_header = "|", False
         nivel = "ple"
@@ -235,8 +231,6 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
         "columnas": mapeo,
     }
     if tipo_libro == "ventas" and nivel == "ple":
-        # El parser dedicado del 14.1 ya validó la aritmética con los 12 componentes
-        # (incluye ISC, IVAP, ICBPER y descuentos que el chequeo genérico no ve).
         validacion = {
             "ok": True,
             "aritmetica_pct": None,
@@ -249,8 +243,6 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
     else:
         validacion = validar_mapeo(content, config, tipo_libro)
 
-    # Fechas de emisión presentes en el archivo (solo ventas — alimenta el
-    # pre-llenado del control de cobertura del Escenario B)
     fechas_detectadas: list[str] = []
     idx_fecha = mapeo.get("fecha_emision")
     if tipo_libro == "ventas" and idx_fecha is not None:
@@ -315,12 +307,10 @@ def _sugerir(content: bytes, delimiter: str, encoding: str, has_header: bool,
                 mapeo["ruc_proveedor"] = i
                 usadas.add(i)
             elif "numero" not in mapeo and rate(_SERIE_NUM_RE) > 0.9:
-                # La columna trae serie y número juntos ("F001-123"):
-                # se asigna a Número y se pre-marca el modo combinado.
                 mapeo["numero"] = i
                 usadas.add(i)
                 combinado = True
-                mapeo.pop("serie", None)  # la serie sale de esta misma columna
+                mapeo.pop("serie", None)
 
     return mapeo, combinado
 

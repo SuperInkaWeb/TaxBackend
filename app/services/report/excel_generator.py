@@ -240,9 +240,6 @@ def generate_excel(
 
     es_compras = tipo_libro == "compras"
 
-    # La columna "Estado" (ventas) solo se muestra si el formato la aporta
-    # (CSV del POS). En PLE 14.1 o mapeos sin estado, se omite para no dejar
-    # una columna vacía.
     hay_estado = not es_compras and any(
         (rec.status_description or "").strip() for rec in output.scenario_a
     )
