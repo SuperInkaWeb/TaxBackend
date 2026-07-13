@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFi
 from fastapi.responses import Response
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
+from app.core.config import settings
 from app.core.database import get_db, SessionLocal
 from app.api.deps import get_current_user, require_any_role
 from app.models.user import User, UserRole
@@ -73,6 +74,11 @@ def _build_response(job: ReconciliationJob) -> ReconciliationJobResponse:
 
 
 TICKET_FRESCURA_HORAS = 24
+
+# Cola de jobs: cada conciliación pica ~10GB de RAM. El semáforo serializa el
+# trabajo pesado para que N jobs simultáneos no revienten el servidor (OOM).
+# Los que esperan permanecen en estado 'en_cola'. Concurrencia configurable.
+_job_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_JOBS)
 
 
 def _descripcion_cobertura(fechas: list[str] | None) -> str | None:
@@ -142,10 +148,16 @@ async def _run_reconciliation_task(
     (si sigue vivo y es fresco) en vez de generar uno nuevo.
     reuse=True: el usuario eligió reutilizar la propuesta fresca de otro
     job del mismo periodo/libro (Terminado y < 24h).
+
+    El job espera su turno en el semáforo (estado 'en_cola') antes de tocar
+    RAM: así N conciliaciones simultáneas no revientan el servidor.
     """
+    await _job_semaphore.acquire()
     db = SessionLocal()
     try:
         job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
+        if job is None:
+            return
         company = db.query(Company).filter(Company.id == company_id).first()
         creds = db.query(CompanyCredentials).filter(CompanyCredentials.company_id == company_id).first()
 
@@ -330,6 +342,7 @@ async def _run_reconciliation_task(
             pass
     finally:
         db.close()
+        _job_semaphore.release()
 
 
 @router.post("/", response_model=ReconciliationJobResponse, status_code=status.HTTP_201_CREATED)
