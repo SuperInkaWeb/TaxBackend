@@ -194,6 +194,8 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
         if tipo_libro == "ventas" and has_header and _KNOWN_FORMAT_REQUIRED.issubset(set(headers_norm)):
             nivel = "plataforma"
             combinado = True
+            solo_lectura = True
+            formato = "CSV de plataforma reconocida"
             for campo, header in _PLATAFORMA_A_CAMPO.items():
                 if header in headers_norm:
                     mapeo[campo] = headers_norm.index(header)

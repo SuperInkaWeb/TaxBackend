@@ -62,3 +62,16 @@ def test_analizar_detecta_nivel_desconocido_para_csv_generico():
     res = analizar_archivo(_csv_ventas(), "ventas")
     assert res["nivel"] in ("sugerido", "desconocido")
     assert res["solo_lectura"] is False
+
+
+def test_plataforma_es_solo_lectura():
+    """
+    El CSV del POS conocido es formato de fábrica: solo lectura, para que la
+    conciliación use su lector dedicado (que lee el estado del comprobante).
+    """
+    filas = ["type description;number;issued date;amount net;amount tax;amount total;status description"]
+    filas += [f"Boleta;B001-{100 + i};04/05/2026;100.00;18.00;118.00;Aceptado" for i in range(5)]
+    content = ("\n".join(filas) + "\n").encode("latin-1")
+    res = analizar_archivo(content, "ventas")
+    assert res["nivel"] == "plataforma"
+    assert res["solo_lectura"] is True
