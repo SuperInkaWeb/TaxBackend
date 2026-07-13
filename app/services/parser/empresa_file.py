@@ -286,6 +286,10 @@ def _normalize_tipo_cdp(value) -> str:
     for texto, code in _TEXTO_MAP.items():
         if v.startswith(texto):
             return code
+    # Rellena el código de un dígito al formato SUNAT de 2 dígitos:
+    # "1"→"01", "3"→"03", ..., "9"→"09" (los de 2 dígitos como 14/30/50 no cambian).
+    if len(v) == 1 and v.isdigit() and v != "0":
+        return v.zfill(2)
     return v
 
 

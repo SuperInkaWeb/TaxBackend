@@ -24,6 +24,20 @@ def test_codigo_ya_normalizado_se_conserva():
     assert _normalize_tipo_cdp("01") == "01"
 
 
+def test_digito_suelto_se_rellena_con_cero():
+    """'1'→'01', '3'→'03' para que cruce con el formato de 2 dígitos de SUNAT."""
+    assert _normalize_tipo_cdp("1") == "01"
+    assert _normalize_tipo_cdp("3") == "03"
+    assert _normalize_tipo_cdp("7") == "07"
+    assert _normalize_tipo_cdp("8") == "08"
+
+
+def test_codigos_de_dos_digitos_no_cambian():
+    assert _normalize_tipo_cdp("14") == "14"
+    assert _normalize_tipo_cdp("30") == "30"
+    assert _normalize_tipo_cdp("50") == "50"
+
+
 # ---------- Construcción de líneas PLE sintéticas ----------
 
 def _linea_ple_compras(serie="E001", numero="892", ruc="20605019031",
