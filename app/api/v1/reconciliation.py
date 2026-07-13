@@ -1,6 +1,6 @@
 import asyncio
 import json
-import traceback
+import logging
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.responses import Response
@@ -30,6 +30,7 @@ from app.services.report.excel_generator import generate_excel, generate_csv_b, 
 from app.storage import storage
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
+logger = logging.getLogger("sire.reconciliation")
 
 
 def _get_company_and_creds(user: User, db: Session) -> tuple[Company, CompanyCredentials]:
@@ -334,13 +335,23 @@ async def _run_reconciliation_task(
         db.commit()
 
     except Exception as exc:
-        tb = traceback.format_exc()
+        # Traceback completo solo a los logs del servidor (no al usuario).
+        logger.exception("Job de conciliación #%s falló", job_id)
+        # Los ValueError son errores controlados con mensaje en español para el
+        # usuario; cualquier otra excepción muestra un mensaje genérico.
+        if isinstance(exc, ValueError):
+            mensaje = str(exc)
+        else:
+            mensaje = (
+                "Ocurrió un error inesperado al procesar la conciliación. "
+                "Vuelve a intentarlo; si persiste, contacta al soporte."
+            )
         try:
             db.rollback()
             job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
             if job:
                 job.status = JobStatus.error
-                job.error_message = f"{exc}\n\nTraceback:\n{tb}"[:2000]
+                job.error_message = mensaje[:1000]
                 db.commit()
         except Exception:
             pass
