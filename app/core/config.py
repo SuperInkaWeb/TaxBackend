@@ -17,6 +17,12 @@ class Settings(BaseSettings):
 
     ENCRYPTION_KEY: str
 
+    AUTH0_DOMAIN: str = ""
+    AUTH0_AUDIENCE: str = ""
+    AUTH0_SPA_CLIENT_ID: str = ""
+    AUTH0_MGMT_CLIENT_ID: str = ""
+    AUTH0_MGMT_CLIENT_SECRET: str = ""
+
     DATABASE_URL: str
 
     STORAGE_BACKEND: Literal["local", "r2"] = "local"
@@ -40,6 +46,11 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.APP_ENV == "development"
+
+    @computed_field
+    @property
+    def auth0_enabled(self) -> bool:
+        return bool(self.AUTH0_DOMAIN and self.AUTH0_AUDIENCE)
 
 
 settings = Settings()

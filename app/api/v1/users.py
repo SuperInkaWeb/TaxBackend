@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import hash_password, verify_password
 from app.api.deps import get_current_user, require_superadmin, require_empresa_or_above
@@ -20,6 +21,11 @@ def change_my_password(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if settings.auth0_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La contraseña se gestiona en Auth0 (usa '¿Olvidaste tu contraseña?' en el login).",
+        )
     if not verify_password(payload.current_password, current_user.password_hash):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Contraseña actual incorrecta")
     current_user.password_hash = hash_password(payload.new_password)
@@ -82,10 +88,20 @@ def create_user(
     if db.query(User).filter(User.email == payload.email).first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El email ya está registrado")
 
+    auth0_sub = None
+    if settings.auth0_enabled:
+        from app.core.auth0 import crear_usuario, Auth0Error
+
+        try:
+            auth0_sub = crear_usuario(payload_dict["email"], payload_dict["nombre"], payload_dict["password"])
+        except Auth0Error as e:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
     user = User(
         email=payload_dict["email"],
         nombre=payload_dict["nombre"],
         password_hash=hash_password(payload_dict["password"]),
+        auth0_sub=auth0_sub,
         role=payload_dict["role"],
         company_id=payload_dict.get("company_id"),
         status=UserStatus.activo,

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import SlidingWindowLimiter
 from app.core.security import verify_password, create_access_token, create_refresh_token, decode_token
@@ -12,8 +13,17 @@ _limite_por_email = SlidingWindowLimiter(max_attempts=5, window_seconds=900)
 _limite_por_ip = SlidingWindowLimiter(max_attempts=20, window_seconds=900)
 
 
+def _solo_modo_local() -> None:
+    if settings.auth0_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La autenticación se gestiona con Auth0. Usa el botón de inicio de sesión.",
+        )
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    _solo_modo_local()
     email_key = payload.email.strip().lower()
     ip = request.client.host if request.client else "desconocida"
 
@@ -44,6 +54,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
 
 @router.post("/refresh", response_model=TokenResponse)
 def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
+    _solo_modo_local()
     data = decode_token(payload.refresh_token)
     if not data or data.get("type") != "refresh":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token inválido")

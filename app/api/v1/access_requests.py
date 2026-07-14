@@ -2,6 +2,7 @@ import secrets
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import hash_password
 from app.api.deps import require_admin_or_above
@@ -68,10 +69,22 @@ def review_access_request(
         db.flush()
 
         temp_password = secrets.token_urlsafe(9)
+        auth0_sub = None
+        if settings.auth0_enabled:
+            from app.core.auth0 import crear_usuario, enviar_reset_password, Auth0Error
+
+            try:
+                auth0_sub = crear_usuario(req.email, req.nombre, temp_password + "A1!")
+                enviar_reset_password(req.email)
+            except Auth0Error as e:
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+            temp_password = None
+
         user = User(
             email=req.email,
             nombre=req.nombre,
-            password_hash=hash_password(temp_password),
+            password_hash=hash_password(secrets.token_urlsafe(16)) if auth0_sub else hash_password(temp_password),
+            auth0_sub=auth0_sub,
             role=UserRole.empresa,
             company_id=company.id,
             status=UserStatus.activo,

@@ -25,6 +25,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     nombre: Mapped[str] = mapped_column(String(150), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    auth0_sub: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True, index=True)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False)
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), default=UserStatus.activo, nullable=False)
     company_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("companies.id"), nullable=True)
