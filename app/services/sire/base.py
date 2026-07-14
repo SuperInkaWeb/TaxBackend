@@ -203,24 +203,30 @@ async def poll_ticket(
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
         token = await get_token(False)
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.get(
-                ticket_url,
-                headers=_auth_headers(token),
-                params={
-                    "perIni":         periodo,
-                    "perFin":         periodo,
-                    "page":           1,
-                    "perPage":        20,
-                    "codLibro":       cod_libro,
-                    "codOrigenEnvio": "2",
-                    "numTicket":      num_ticket,
-                }
-            )
-            if resp.status_code == 401:
-                await get_token(True)
-                continue
-            resp.raise_for_status()
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.get(
+                    ticket_url,
+                    headers=_auth_headers(token),
+                    params={
+                        "perIni":         periodo,
+                        "perFin":         periodo,
+                        "page":           1,
+                        "perPage":        20,
+                        "codLibro":       cod_libro,
+                        "codOrigenEnvio": "2",
+                        "numTicket":      num_ticket,
+                    }
+                )
+        except httpx.TransportError:
+            continue
+
+        if resp.status_code == 401:
+            await get_token(True)
+            continue
+        if resp.status_code >= 500:
+            continue
+        resp.raise_for_status()
 
         registros = resp.json().get("registros", [])
         if not registros:
