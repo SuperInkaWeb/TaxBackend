@@ -1,4 +1,5 @@
 import io
+import re
 from dataclasses import dataclass
 
 import pandas as pd
@@ -81,85 +82,128 @@ def _to_float(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series.str.replace(",", ".", regex=False), errors="coerce").fillna(0.0)
 
 
+_FECHA_SLASH = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
+
+
+def _normalizar_fecha(valor: str) -> str:
+    """dd/mm/yyyy → yyyy-mm-dd; cualquier otro formato se devuelve tal cual."""
+    m = _FECHA_SLASH.match(valor)
+    if not m:
+        return valor
+    d, mo, y = m.groups()
+    return f"{y}-{mo.zfill(2)}-{d.zfill(2)}"
+
+
 def parse_sunat_propuesta(txt_bytes: bytes, tipo_libro: str) -> list[SunatRecord]:
     """
     Parsea el TXT pipe-delimited de la propuesta SUNAT.
     tipo_libro: 'compras' | 'ventas'
 
-    Usa operaciones vectorizadas (sin iterrows) para manejar archivos de millones de filas.
+    Procesa por chunks de 1M de filas: el pico de RAM queda acotado por el
+    tamaño de un chunk más los registros acumulados, no por el archivo entero.
     """
-    text: str | None = None
-    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+    encoding = "latin-1"
+    for enc in ("utf-8-sig", "utf-8"):
         try:
-            text = txt_bytes.decode(enc)
+            txt_bytes[:65536].decode(enc)
+            encoding = enc
             break
         except UnicodeDecodeError:
             continue
-    if text is None:
-        text = txt_bytes.decode("latin-1", errors="replace")
 
     col_idx = COMPRAS_COL_IDX if tipo_libro == "compras" else VENTAS_COL_IDX
 
-    df = pd.read_csv(
-        io.StringIO(text),
-        sep="|",
-        header=0,
-        dtype=str,
-        skip_blank_lines=True,
-        on_bad_lines="skip",
+    read_opts = dict(
+        sep="|", header=0, dtype=str, skip_blank_lines=True,
+        on_bad_lines="skip", encoding=encoding, encoding_errors="replace",
+        chunksize=1_000_000,
     )
+    usecols = sorted(set(col_idx.values()))
+    try:
+        reader = pd.read_csv(io.BytesIO(txt_bytes), usecols=usecols, **read_opts)
+        chunk = next(reader, None)
+        pos = {orig: i for i, orig in enumerate(usecols)}
+    except ValueError:
+        reader = pd.read_csv(io.BytesIO(txt_bytes), **read_opts)
+        chunk = next(reader, None)
+        pos = {orig: orig for orig in col_idx.values()}
+    del txt_bytes
 
+    records: list[SunatRecord] = []
+    fecha_map: dict[str, str] = {}
+    while chunk is not None:
+        df = chunk
+        chunk = None
+        _procesar_chunk(df, col_idx, pos, fecha_map, records)
+        del df
+        chunk = next(reader, None)
+    return records
+
+
+def _procesar_chunk(
+    df: pd.DataFrame,
+    col_idx: dict[str, int],
+    pos: dict[int, int],
+    fecha_map: dict[str, str],
+    records: list[SunatRecord],
+) -> None:
+    """Convierte un chunk del TXT en SunatRecords y los agrega a `records`."""
     if df.empty:
-        return []
+        return
 
-    tipo_cdp_s = _col(df, col_idx["tipo_cdp"])
-    serie_s    = _col(df, col_idx["serie"])
-    numero_s   = _col(df, col_idx["numero"])
+    def _serie(campo: str) -> pd.Series:
+        if campo not in col_idx:
+            return pd.Series("", index=df.index, dtype=str)
+        return _col(df, pos[col_idx[campo]])
 
-    mask = ~(tipo_cdp_s.eq("") & serie_s.eq("") & numero_s.eq(""))
-    df         = df[mask].reset_index(drop=True)
-    tipo_cdp_s = tipo_cdp_s[mask].reset_index(drop=True)
-    serie_s    = serie_s[mask].reset_index(drop=True)
-    numero_s   = numero_s[mask].reset_index(drop=True)
+    def _num(campo: str) -> pd.Series:
+        if campo not in col_idx:
+            return pd.Series(0.0, index=df.index)
+        return _to_float(_col(df, pos[col_idx[campo]]))
 
-    fecha_s   = _col(df, col_idx["fecha_emision"])
-    base_s    = _to_float(_col(df, col_idx["base_imponible"]))
-    igv_s     = _to_float(_col(df, col_idx["igv"]))
-    importe_s = _to_float(_col(df, col_idx["importe_total"]))
-    tc_s      = _to_float(_col(df, col_idx["tipo_cambio"])).replace(0.0, 1.0)
+    tipo_cdp_s = _serie("tipo_cdp")
+    serie_s    = _serie("serie")
+    numero_s   = _serie("numero")
+    fecha_s    = _serie("fecha_emision")
+    base_s     = _num("base_imponible")
+    igv_s      = _num("igv")
+    importe_s  = _num("importe_total")
+    tc_s       = _num("tipo_cambio").replace(0.0, 1.0)
 
     if "descuento_base_imponible" in col_idx:
-        base_s = base_s + _to_float(_col(df, col_idx["descuento_base_imponible"]))
+        base_s = base_s + _num("descuento_base_imponible")
     if "descuento_igv" in col_idx:
-        igv_s = igv_s + _to_float(_col(df, col_idx["descuento_igv"]))
+        igv_s = igv_s + _num("descuento_igv")
 
-    if "mto_exonerado" in col_idx:
-        exo_s = _to_float(_col(df, col_idx["mto_exonerado"]))
-        ina_s = _to_float(_col(df, col_idx["mto_inafecto"]))
-    else:
-        exo_s = pd.Series(0.0, index=df.index)
-        ina_s = pd.Series(0.0, index=df.index)
+    exo_s     = _num("mto_exonerado")
+    ina_s     = _num("mto_inafecto")
+    ruc_s     = _serie("ruc_proveedor")
+    razon_s   = _serie("razon_social")
+    moneda_s  = _serie("moneda")
+    dgng_b_s  = _num("bi_dgng")
+    dgng_i_s  = _num("igv_dgng")
+    dng_b_s   = _num("bi_dng")
+    dng_i_s   = _num("igv_dng")
+    ang_s     = _num("valor_adq_ng")
 
-    def _opt_str(campo: str) -> pd.Series:
-        return _col(df, col_idx[campo]) if campo in col_idx else pd.Series("", index=df.index)
+    mask = ~(tipo_cdp_s.eq("") & serie_s.eq("") & numero_s.eq(""))
+    if not mask.all():
+        (tipo_cdp_s, serie_s, numero_s, fecha_s, base_s, igv_s, importe_s, tc_s,
+         exo_s, ina_s, ruc_s, razon_s, moneda_s,
+         dgng_b_s, dgng_i_s, dng_b_s, dng_i_s, ang_s) = (
+            s[mask].reset_index(drop=True)
+            for s in (tipo_cdp_s, serie_s, numero_s, fecha_s, base_s, igv_s, importe_s, tc_s,
+                      exo_s, ina_s, ruc_s, razon_s, moneda_s,
+                      dgng_b_s, dgng_i_s, dng_b_s, dng_i_s, ang_s)
+        )
 
-    def _opt_num(campo: str) -> pd.Series:
-        return _to_float(_col(df, col_idx[campo])) if campo in col_idx else pd.Series(0.0, index=df.index)
+    for v in fecha_s.unique():
+        if v not in fecha_map:
+            fecha_map[v] = _normalizar_fecha(v)
+    fecha_norm = fecha_s.map(fecha_map)
+    del fecha_s
 
-    ruc_s     = _opt_str("ruc_proveedor")
-    razon_s   = _opt_str("razon_social")
-    moneda_s  = _opt_str("moneda")
-    dgng_b_s  = _opt_num("bi_dgng")
-    dgng_i_s  = _opt_num("igv_dgng")
-    dng_b_s   = _opt_num("bi_dng")
-    dng_i_s   = _opt_num("igv_dng")
-    ang_s     = _opt_num("valor_adq_ng")
-
-    parts = fecha_s.str.extract(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
-    is_slash = parts[0].notna()
-    fecha_norm = (parts[2] + "-" + parts[1].str.zfill(2) + "-" + parts[0].str.zfill(2)).where(is_slash, fecha_s)
-
-    records = [
+    records.extend(
         SunatRecord(
             tipo_cdp       = t,
             serie          = s,
@@ -188,6 +232,4 @@ def parse_sunat_propuesta(txt_bytes: bytes, tipo_libro: str) -> list[SunatRecord
             dgng_b_s.tolist(), dgng_i_s.tolist(), dng_b_s.tolist(), dng_i_s.tolist(),
             ang_s.tolist(), moneda_s.tolist(),
         )
-    ]
-
-    return records
+    )

@@ -206,6 +206,8 @@ async def _run_reconciliation_task(
                         f"{detalle}. Formato esperado: {formato_esperado}."
                     )
 
+        del empresa_content
+
         async def get_token(force_refresh: bool = False) -> str:
             return await get_sunat_token(company_id, creds, company.ruc, force_refresh)
 
@@ -245,9 +247,11 @@ async def _run_reconciliation_task(
             job.propuesta_origen_at = datetime.now(timezone.utc)
             db.commit()
 
-        sunat_bytes = await descargar(get_token, num_ticket, periodo)
+        contenedor = [await descargar(get_token, num_ticket, periodo)]
 
-        sunat_records = await asyncio.to_thread(parse_sunat_propuesta, sunat_bytes, tipo_libro.value)
+        sunat_records = await asyncio.to_thread(
+            lambda: parse_sunat_propuesta(contenedor.pop(), tipo_libro.value)
+        )
 
         recon_output = await asyncio.to_thread(
             reconcile, empresa_records, sunat_records, tipo_libro.value,
