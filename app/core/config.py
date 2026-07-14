@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_HOURS: int = 8
 
-    MAX_CONCURRENT_JOBS: int = 1
+    MAX_CONCURRENT_JOBS: int = 3
 
     ENCRYPTION_KEY: str
 
@@ -25,12 +25,7 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
 
-    STORAGE_BACKEND: Literal["local", "r2"] = "local"
     STORAGE_LOCAL_PATH: str = "./storage"
-    R2_ACCOUNT_ID: str = ""
-    R2_ACCESS_KEY_ID: str = ""
-    R2_SECRET_ACCESS_KEY: str = ""
-    R2_BUCKET_NAME: str = "sire-reportes"
 
     RESEND_API_KEY: str = ""
     EMAIL_FROM: str = "noreply@example.com"
