@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+storage/
+tests/
+scripts/output/
+.git/
+.pytest_cache/
+README.md
