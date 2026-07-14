@@ -1,3 +1,4 @@
+import secrets
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -57,6 +58,7 @@ def review_access_request(
     req.reviewed_at = datetime.now(timezone.utc)
     req.rejection_reason = payload.rejection_reason
 
+    temp_password: str | None = None
     if payload.status == AccessRequestStatus.aprobado:
         if db.query(Company).filter(Company.ruc == req.ruc).first():
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="RUC ya registrado en el sistema")
@@ -65,7 +67,7 @@ def review_access_request(
         db.add(company)
         db.flush()
 
-        temp_password = f"SIRE{req.ruc}!"
+        temp_password = secrets.token_urlsafe(9)
         user = User(
             email=req.email,
             nombre=req.nombre,
@@ -78,4 +80,6 @@ def review_access_request(
 
     db.commit()
     db.refresh(req)
-    return req
+    resp = AccessRequestResponse.model_validate(req)
+    resp.temp_password = temp_password
+    return resp

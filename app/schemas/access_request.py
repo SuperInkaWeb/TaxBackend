@@ -31,3 +31,4 @@ class AccessRequestResponse(BaseModel):
     rejection_reason: str | None
     created_at: datetime
     reviewed_at: datetime | None
+    temp_password: str | None = None

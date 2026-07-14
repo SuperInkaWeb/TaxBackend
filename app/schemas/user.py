@@ -1,12 +1,14 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
 from app.models.user import UserRole, UserStatus
+
+PASSWORD_MIN = 8
 
 
 class UserCreate(BaseModel):
     email: EmailStr
     nombre: str
-    password: str
+    password: str = Field(min_length=PASSWORD_MIN)
     role: UserRole
     company_id: int | None = None
 
@@ -31,4 +33,4 @@ class UserResponse(BaseModel):
 
 class UserChangePassword(BaseModel):
     current_password: str
-    new_password: str
+    new_password: str = Field(min_length=PASSWORD_MIN)
