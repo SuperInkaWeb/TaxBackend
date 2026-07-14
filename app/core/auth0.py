@@ -113,6 +113,23 @@ def crear_usuario(email: str, nombre: str, password: str) -> str:
     return resp.json()["user_id"]
 
 
+def buscar_sub_por_email(email: str) -> str | None:
+    """Busca un usuario ya existente en Auth0 y devuelve su ID (sub), o None."""
+    resp = httpx.get(
+        f"{_issuer()}api/v2/users-by-email",
+        headers={"Authorization": f"Bearer {_mgmt_token()}"},
+        params={"email": email},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise Auth0Error(f"No se pudo buscar el usuario en Auth0: {resp.text[:200]}")
+    usuarios = resp.json()
+    for u in usuarios:
+        if u.get("user_id", "").startswith("auth0|"):
+            return u["user_id"]
+    return usuarios[0]["user_id"] if usuarios else None
+
+
 def eliminar_usuario(auth0_sub: str) -> None:
     resp = httpx.delete(
         f"{_issuer()}api/v2/users/{auth0_sub}",

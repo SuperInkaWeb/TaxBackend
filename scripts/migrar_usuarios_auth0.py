@@ -29,7 +29,7 @@ def main() -> None:
         print("AUTH0_DOMAIN / AUTH0_AUDIENCE no están configurados en .env")
         sys.exit(1)
 
-    from app.core.auth0 import crear_usuario, enviar_reset_password, Auth0Error
+    from app.core.auth0 import crear_usuario, buscar_sub_por_email, enviar_reset_password, Auth0Error
 
     relink = "--relink" in sys.argv
 
@@ -62,7 +62,20 @@ def main() -> None:
                 print(f"  OK  {u.email} -> {sub} (email de contraseña enviado)")
             except Auth0Error as e:
                 db.rollback()
-                print(f"  ERROR  {u.email}: {e}")
+                if "ya existe" not in str(e):
+                    print(f"  ERROR  {u.email}: {e}")
+                    continue
+                try:
+                    sub = buscar_sub_por_email(u.email)
+                    if sub is None:
+                        print(f"  ERROR  {u.email}: existe en Auth0 pero no se pudo obtener su ID")
+                        continue
+                    u.auth0_sub = sub
+                    db.commit()
+                    print(f"  OK  {u.email} -> {sub} (ya existía en Auth0, vinculado sin email)")
+                except Auth0Error as e2:
+                    db.rollback()
+                    print(f"  ERROR  {u.email}: {e2}")
     finally:
         db.close()
 
