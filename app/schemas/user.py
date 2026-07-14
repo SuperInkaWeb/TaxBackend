@@ -8,7 +8,7 @@ PASSWORD_MIN = 8
 class UserCreate(BaseModel):
     email: EmailStr
     nombre: str
-    password: str = Field(min_length=PASSWORD_MIN)
+    password: str | None = Field(default=None, min_length=PASSWORD_MIN)
     role: UserRole
     company_id: int | None = None
 

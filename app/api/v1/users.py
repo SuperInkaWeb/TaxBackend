@@ -1,3 +1,5 @@
+import secrets
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.core.config import settings
@@ -90,17 +92,26 @@ def create_user(
 
     auth0_sub = None
     if settings.auth0_enabled:
-        from app.core.auth0 import crear_usuario, Auth0Error
+        from app.core.auth0 import crear_usuario, enviar_reset_password, Auth0Error
 
+        password = secrets.token_urlsafe(12) + "A1!"
         try:
-            auth0_sub = crear_usuario(payload_dict["email"], payload_dict["nombre"], payload_dict["password"])
+            auth0_sub = crear_usuario(payload_dict["email"], payload_dict["nombre"], password)
+            enviar_reset_password(payload_dict["email"])
         except Auth0Error as e:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    else:
+        if not payload_dict.get("password"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La contraseña es obligatoria",
+            )
+        password = payload_dict["password"]
 
     user = User(
         email=payload_dict["email"],
         nombre=payload_dict["nombre"],
-        password_hash=hash_password(payload_dict["password"]),
+        password_hash=hash_password(password),
         auth0_sub=auth0_sub,
         role=payload_dict["role"],
         company_id=payload_dict.get("company_id"),
@@ -131,3 +142,49 @@ def update_user(
     db.commit()
     db.refresh(user)
     return user
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(
+    user_id: int,
+    current_user: User = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+):
+    """
+    Elimina un usuario de la BD y de Auth0 (si está vinculado).
+    Si el usuario tiene conciliaciones, se bloquea: desactivarlo preserva el historial.
+    """
+    from app.models.access_request import AccessRequest
+    from app.models.company import Company
+    from app.models.credentials import CompanyCredentials
+    from app.models.reconciliation import ReconciliationJob
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+    if user.id == current_user.id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No puedes eliminar tu propia cuenta")
+    if user.role == UserRole.superadmin:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No se puede eliminar un superadmin")
+
+    jobs = db.query(ReconciliationJob).filter(ReconciliationJob.created_by_id == user.id).count()
+    if jobs:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"El usuario tiene {jobs} conciliación(es) en el historial. Desactívalo en su lugar.",
+        )
+
+    if settings.auth0_enabled and user.auth0_sub:
+        from app.core.auth0 import eliminar_usuario, Auth0Error
+
+        try:
+            eliminar_usuario(user.auth0_sub)
+        except Auth0Error as e:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
+    db.query(AccessRequest).filter(AccessRequest.reviewed_by_id == user.id).update({"reviewed_by_id": None})
+    db.query(Company).filter(Company.approved_by_id == user.id).update({"approved_by_id": None})
+    db.query(CompanyCredentials).filter(CompanyCredentials.updated_by_id == user.id).update({"updated_by_id": None})
+
+    db.delete(user)
+    db.commit()
