@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from app.storage.base import BaseStorage
 from app.core.config import settings

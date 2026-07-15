@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session, joinedload
 from app.core.config import settings
 from app.core.database import get_db, SessionLocal
-from app.api.deps import get_current_user, require_any_role
+from app.api.deps import require_any_role
 from app.models.user import User, UserRole
 from app.models.company import Company
 from app.models.credentials import CompanyCredentials
@@ -126,6 +126,65 @@ def _buscar_ticket_fresco(
     return query.order_by(ReconciliationJob.id.desc()).first()
 
 
+async def _obtener_registros_empresa(
+    db,
+    empresa_file_path: str,
+    empresa_filename: str,
+    company_id: int,
+    tipo_libro: TipoLibro,
+    mapeo_config: dict | None,
+) -> list:
+    """
+    Lee el archivo de la empresa y lo convierte en registros según el mapeo
+    aplicable (explícito, formato conocido o guardado de la empresa).
+    Al retornar, el contenido crudo del archivo sale de scope y libera RAM.
+    """
+    contenido = await asyncio.to_thread(storage.read, empresa_file_path)
+
+    async def _parse_con(config: dict) -> list:
+        val = await asyncio.to_thread(validar_mapeo, contenido, config, tipo_libro.value)
+        if not val["ok"]:
+            detalle = "; ".join(val["avisos"]) if val["avisos"] else f"faltan campos: {val['faltantes']}"
+            raise ValueError(f"El mapeo de columnas no supera la validación: {detalle}")
+        recs = await asyncio.to_thread(parse_con_columnas, contenido, config, tipo_libro.value)
+        if not recs:
+            raise ValueError("No se extrajo ningún registro con el mapeo de columnas configurado.")
+        return recs
+
+    if mapeo_config is not None:
+        return await _parse_con(mapeo_config)
+
+    registros, used_mapping = await asyncio.to_thread(
+        parse_empresa_file, contenido, empresa_filename, None, tipo_libro.value
+    )
+    if used_mapping.known_format:
+        return registros
+
+    saved_model = db.query(CompanyFileMapping).filter(
+        CompanyFileMapping.company_id == company_id,
+        CompanyFileMapping.tipo_libro == tipo_libro.value,
+    ).first()
+    if saved_model and saved_model.columnas and saved_model.confirmed_by_user:
+        return await _parse_con({
+            "delimiter": saved_model.delimiter,
+            "encoding": saved_model.encoding,
+            "has_header": saved_model.has_header,
+            "skip_rows": saved_model.skip_rows,
+            "serie_numero_combinado": saved_model.serie_numero_combinado,
+            "columnas": saved_model.columnas,
+        })
+
+    formato_esperado = (
+        PLE81_FORMAT_HELP if tipo_libro == TipoLibro.compras
+        else f"CSV con las columnas: {KNOWN_FORMAT_COLUMNS_HELP}"
+    )
+    detalle = "; ".join(used_mapping.warnings) or "formato no reconocido"
+    raise ValueError(
+        f"El archivo no tiene el formato esperado para {tipo_libro.value}. "
+        f"{detalle}. Formato esperado: {formato_esperado}."
+    )
+
+
 async def _run_reconciliation_task(
     job_id: int,
     empresa_file_path: str,
@@ -162,51 +221,9 @@ async def _run_reconciliation_task(
         job.status = JobStatus.procesando
         db.commit()
 
-        empresa_content = await asyncio.to_thread(storage.read, empresa_file_path)
-
-        formato_esperado = (
-            PLE81_FORMAT_HELP if tipo_libro == TipoLibro.compras
-            else f"CSV con las columnas: {KNOWN_FORMAT_COLUMNS_HELP}"
+        empresa_records = await _obtener_registros_empresa(
+            db, empresa_file_path, empresa_filename, company_id, tipo_libro, mapeo_config
         )
-
-        async def _parse_con(config: dict) -> list:
-            val = await asyncio.to_thread(validar_mapeo, empresa_content, config, tipo_libro.value)
-            if not val["ok"]:
-                detalle = "; ".join(val["avisos"]) if val["avisos"] else f"faltan campos: {val['faltantes']}"
-                raise ValueError(f"El mapeo de columnas no supera la validación: {detalle}")
-            recs = await asyncio.to_thread(parse_con_columnas, empresa_content, config, tipo_libro.value)
-            if not recs:
-                raise ValueError("No se extrajo ningún registro con el mapeo de columnas configurado.")
-            return recs
-
-        if mapeo_config is not None:
-            empresa_records = await _parse_con(mapeo_config)
-        else:
-            empresa_records, used_mapping = await asyncio.to_thread(
-                parse_empresa_file, empresa_content, empresa_filename, None, tipo_libro.value
-            )
-            if not used_mapping.known_format:
-                saved_model = db.query(CompanyFileMapping).filter(
-                    CompanyFileMapping.company_id == company_id,
-                    CompanyFileMapping.tipo_libro == tipo_libro.value,
-                ).first()
-                if saved_model and saved_model.columnas and saved_model.confirmed_by_user:
-                    empresa_records = await _parse_con({
-                        "delimiter": saved_model.delimiter,
-                        "encoding": saved_model.encoding,
-                        "has_header": saved_model.has_header,
-                        "skip_rows": saved_model.skip_rows,
-                        "serie_numero_combinado": saved_model.serie_numero_combinado,
-                        "columnas": saved_model.columnas,
-                    })
-                else:
-                    detalle = "; ".join(used_mapping.warnings) or "formato no reconocido"
-                    raise ValueError(
-                        f"El archivo no tiene el formato esperado para {tipo_libro.value}. "
-                        f"{detalle}. Formato esperado: {formato_esperado}."
-                    )
-
-        del empresa_content
 
         async def get_token(force_refresh: bool = False) -> str:
             return await get_sunat_token(company_id, creds, company.ruc, force_refresh)

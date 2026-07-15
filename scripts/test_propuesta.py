@@ -181,7 +181,7 @@ async def main():
 
     separador("3/4  Esperando que SUNAT procese")
     print(f"  Polling cada {POLL_INTERVAL}s, máximo {POLL_MAX * POLL_INTERVAL // 60} min")
-    print(f"  (empresas grandes pueden tardar 10-30 min)\n")
+    print("  (empresas grandes pueden tardar 10-30 min)\n")
 
     reg              = {}
     archivo_reportes = []
@@ -359,7 +359,7 @@ async def main():
         print()
 
     separador()
-    print(f"  LISTO")
+    print("  LISTO")
     print(f"  Archivos en: {output_dir}")
     separador()
 
