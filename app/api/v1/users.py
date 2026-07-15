@@ -158,6 +158,7 @@ def delete_user(
     from app.models.company import Company
     from app.models.credentials import CompanyCredentials
     from app.models.reconciliation import ReconciliationJob
+    from app.models.ticket import Ticket, TicketMessage
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -173,6 +174,12 @@ def delete_user(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"El usuario tiene {jobs} conciliación(es) en el historial. Desactívalo en su lugar.",
         )
+    tickets = db.query(Ticket).filter(Ticket.created_by_id == user.id).count()
+    if tickets:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"El usuario tiene {tickets} ticket(s) de soporte. Desactívalo en su lugar.",
+        )
 
     if settings.auth0_enabled and user.auth0_sub:
         from app.core.auth0 import eliminar_usuario, Auth0Error
@@ -185,6 +192,7 @@ def delete_user(
     db.query(AccessRequest).filter(AccessRequest.reviewed_by_id == user.id).update({"reviewed_by_id": None})
     db.query(Company).filter(Company.approved_by_id == user.id).update({"approved_by_id": None})
     db.query(CompanyCredentials).filter(CompanyCredentials.updated_by_id == user.id).update({"updated_by_id": None})
+    db.query(TicketMessage).filter(TicketMessage.author_id == user.id).update({"author_id": None})
 
     db.delete(user)
     db.commit()
