@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.responses import Response
 from pydantic import ValidationError
@@ -210,60 +211,81 @@ async def _run_reconciliation_task(
     RAM: así N conciliaciones simultáneas no revientan el servidor.
     """
     await _job_semaphore.acquire()
-    db = SessionLocal()
     try:
-        job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
-        if job is None:
-            return
-        company = db.query(Company).filter(Company.id == company_id).first()
-        creds = db.query(CompanyCredentials).filter(CompanyCredentials.company_id == company_id).first()
+        # Fase 1: trabajo breve con la BD (leer, marcar 'procesando', pedir el
+        # ticket a SUNAT). Se extraen a variables planas los datos que se usan
+        # después y se cierra la sesión: durante la descarga larga (fase 2) no
+        # se mantiene ninguna conexión ociosa que Neon pueda cerrar.
+        db = SessionLocal()
+        try:
+            job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
+            if job is None:
+                return
+            company = db.query(Company).filter(Company.id == company_id).first()
+            creds = db.query(CompanyCredentials).filter(CompanyCredentials.company_id == company_id).first()
 
-        job.status = JobStatus.procesando
-        db.commit()
-
-        empresa_records = await _obtener_registros_empresa(
-            db, empresa_file_path, empresa_filename, company_id, tipo_libro, mapeo_config
-        )
-
-        async def get_token(force_refresh: bool = False) -> str:
-            return await get_sunat_token(company_id, creds, company.ruc, force_refresh)
-
-        if tipo_libro == TipoLibro.compras:
-            solicitar, consultar, descargar = (
-                solicitar_export_compras, consultar_ticket_compras, descargar_ticket_compras,
-            )
-        else:
-            solicitar, consultar, descargar = (
-                solicitar_export_ventas, consultar_ticket_ventas, descargar_ticket_ventas,
-            )
-
-        num_ticket = None
-        if resume and job.num_ticket:
-            created = job.created_at if job.created_at.tzinfo else job.created_at.replace(tzinfo=timezone.utc)
-            es_fresco = datetime.now(timezone.utc) - created < timedelta(hours=TICKET_FRESCURA_HORAS)
-            if es_fresco:
-                consulta = await consultar(get_token, job.num_ticket, periodo)
-                if consulta is not None:
-                    estado = consulta[0].lower()
-                    if "error" not in estado:
-                        num_ticket = job.num_ticket
-
-        if num_ticket is None and reuse:
-            candidato = _buscar_ticket_fresco(db, company_id, periodo, tipo_libro, exclude_job_id=job_id)
-            if candidato is not None:
-                consulta = await consultar(get_token, candidato.num_ticket, periodo)
-                if consulta is not None and "terminado" in consulta[0].lower():
-                    num_ticket = candidato.num_ticket
-                    job.num_ticket = num_ticket
-                    job.propuesta_origen_at = candidato.propuesta_origen_at or candidato.created_at
-                    db.commit()
-
-        if num_ticket is None:
-            num_ticket = await solicitar(get_token, periodo)
-            job.num_ticket = num_ticket
-            job.propuesta_origen_at = datetime.now(timezone.utc)
+            job.status = JobStatus.procesando
             db.commit()
 
+            empresa_records = await _obtener_registros_empresa(
+                db, empresa_file_path, empresa_filename, company_id, tipo_libro, mapeo_config
+            )
+
+            ruc = company.ruc
+            empresa_nombre = company.nombre_razon_social
+            creds_snapshot = SimpleNamespace(
+                client_id=creds.client_id,
+                client_secret_enc=creds.client_secret_enc,
+                clave_sol_enc=creds.clave_sol_enc,
+                usuario_sol=creds.usuario_sol,
+            )
+
+            async def get_token(force_refresh: bool = False) -> str:
+                return await get_sunat_token(company_id, creds_snapshot, ruc, force_refresh)
+
+            if tipo_libro == TipoLibro.compras:
+                solicitar, consultar, descargar = (
+                    solicitar_export_compras, consultar_ticket_compras, descargar_ticket_compras,
+                )
+            else:
+                solicitar, consultar, descargar = (
+                    solicitar_export_ventas, consultar_ticket_ventas, descargar_ticket_ventas,
+                )
+
+            num_ticket = None
+            if resume and job.num_ticket:
+                created = job.created_at if job.created_at.tzinfo else job.created_at.replace(tzinfo=timezone.utc)
+                es_fresco = datetime.now(timezone.utc) - created < timedelta(hours=TICKET_FRESCURA_HORAS)
+                if es_fresco:
+                    consulta = await consultar(get_token, job.num_ticket, periodo)
+                    if consulta is not None:
+                        estado = consulta[0].lower()
+                        if "error" not in estado:
+                            num_ticket = job.num_ticket
+
+            if num_ticket is None and reuse:
+                candidato = _buscar_ticket_fresco(db, company_id, periodo, tipo_libro, exclude_job_id=job_id)
+                if candidato is not None:
+                    consulta = await consultar(get_token, candidato.num_ticket, periodo)
+                    if consulta is not None and "terminado" in consulta[0].lower():
+                        num_ticket = candidato.num_ticket
+                        job.num_ticket = num_ticket
+                        job.propuesta_origen_at = candidato.propuesta_origen_at or candidato.created_at
+                        db.commit()
+
+            if num_ticket is None:
+                num_ticket = await solicitar(get_token, periodo)
+                job.num_ticket = num_ticket
+                job.propuesta_origen_at = datetime.now(timezone.utc)
+                db.commit()
+
+            propuesta_origen_at = job.propuesta_origen_at
+            empresa_file_path_guardado = job.empresa_file_path
+        finally:
+            db.close()
+
+        # Fase 2: descarga (polling + ZIP, puede durar decenas de minutos),
+        # parseo, conciliación y generación de reportes. SIN conexión a la BD.
         contenedor = [await descargar(get_token, num_ticket, periodo)]
 
         sunat_records = await asyncio.to_thread(
@@ -278,11 +300,11 @@ async def _run_reconciliation_task(
         excel_bytes = await asyncio.to_thread(
             generate_excel,
             output=recon_output,
-            empresa_nombre=company.nombre_razon_social,
-            ruc=company.ruc,
+            empresa_nombre=empresa_nombre,
+            ruc=ruc,
             periodo=periodo,
             tipo_libro=tipo_libro.value,
-            propuesta_generada=job.propuesta_origen_at,
+            propuesta_generada=propuesta_origen_at,
             cobertura=_descripcion_cobertura(cobertura_fechas),
         )
 
@@ -294,55 +316,59 @@ async def _run_reconciliation_task(
         if len(recon_output.scenario_d) > EXCEL_D_LIMIT:
             csv_d_bytes = await asyncio.to_thread(generate_csv_d, recon_output, tipo_libro.value)
 
-        filename_xlsx = f"{company.ruc}_{periodo}_{tipo_libro.value}.xlsx"
+        filename_xlsx = f"{ruc}_{periodo}_{tipo_libro.value}.xlsx"
         path_xlsx = f"reportes/{company_id}/{job_id}/{filename_xlsx}"
         storage.save(path_xlsx, excel_bytes)
 
         path_csv = None
         if csv_b_bytes is not None:
-            filename_csv = f"{company.ruc}_{periodo}_{tipo_libro.value}_B.csv"
+            filename_csv = f"{ruc}_{periodo}_{tipo_libro.value}_B.csv"
             path_csv = f"reportes/{company_id}/{job_id}/{filename_csv}"
             storage.save(path_csv, csv_b_bytes)
 
         path_csv_d = None
         if csv_d_bytes is not None:
-            filename_csv_d = f"{company.ruc}_{periodo}_{tipo_libro.value}_D.csv"
+            filename_csv_d = f"{ruc}_{periodo}_{tipo_libro.value}_D.csv"
             path_csv_d = f"reportes/{company_id}/{job_id}/{filename_csv_d}"
             storage.save(path_csv_d, csv_d_bytes)
 
-        result = ReconciliationResult(
-            job_id=job_id,
-            escenario_a_count=len(recon_output.scenario_a),
-            escenario_b_count=len(recon_output.scenario_b),
-            escenario_c_count=len(recon_output.scenario_c),
-            escenario_d_count=len(recon_output.scenario_d),
-            igv_diferencia_total=recon_output.igv_diferencia_total,
-            tiene_alertas_rojas=recon_output.tiene_alertas_rojas,
-        )
-        db.add(result)
-
-        report = ReportFile(
-            job_id=job_id,
-            filename=filename_xlsx,
-            storage_path=path_xlsx,
-            file_size_bytes=len(excel_bytes),
-            csv_b_storage_path=path_csv,
-            csv_b_file_size_bytes=len(csv_b_bytes) if csv_b_bytes is not None else None,
-            csv_d_storage_path=path_csv_d,
-            csv_d_file_size_bytes=len(csv_d_bytes) if csv_d_bytes is not None else None,
-        )
-        db.add(report)
-
-        if job.empresa_file_path:
+        if empresa_file_path_guardado:
             try:
-                storage.delete(job.empresa_file_path)
+                storage.delete(empresa_file_path_guardado)
             except Exception:
                 pass
-            job.empresa_file_path = None
 
-        job.status = JobStatus.completado
-        job.completed_at = datetime.now(timezone.utc)
-        db.commit()
+        # Fase 3: sesión NUEVA para guardar el resultado (conexión fresca, no
+        # una que quedó ociosa durante la descarga).
+        db = SessionLocal()
+        try:
+            db.add(ReconciliationResult(
+                job_id=job_id,
+                escenario_a_count=len(recon_output.scenario_a),
+                escenario_b_count=len(recon_output.scenario_b),
+                escenario_c_count=len(recon_output.scenario_c),
+                escenario_d_count=len(recon_output.scenario_d),
+                igv_diferencia_total=recon_output.igv_diferencia_total,
+                tiene_alertas_rojas=recon_output.tiene_alertas_rojas,
+            ))
+            db.add(ReportFile(
+                job_id=job_id,
+                filename=filename_xlsx,
+                storage_path=path_xlsx,
+                file_size_bytes=len(excel_bytes),
+                csv_b_storage_path=path_csv,
+                csv_b_file_size_bytes=len(csv_b_bytes) if csv_b_bytes is not None else None,
+                csv_d_storage_path=path_csv_d,
+                csv_d_file_size_bytes=len(csv_d_bytes) if csv_d_bytes is not None else None,
+            ))
+            job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
+            if job:
+                job.empresa_file_path = None
+                job.status = JobStatus.completado
+                job.completed_at = datetime.now(timezone.utc)
+            db.commit()
+        finally:
+            db.close()
 
     except Exception as exc:
         logger.exception("Job de conciliación #%s falló", job_id)
@@ -353,8 +379,8 @@ async def _run_reconciliation_task(
                 "Ocurrió un error inesperado al procesar la conciliación. "
                 "Vuelve a intentarlo; si persiste, contacta al soporte."
             )
+        db = SessionLocal()
         try:
-            db.rollback()
             job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
             if job:
                 job.status = JobStatus.error
@@ -362,8 +388,9 @@ async def _run_reconciliation_task(
                 db.commit()
         except Exception:
             pass
+        finally:
+            db.close()
     finally:
-        db.close()
         _job_semaphore.release()
 
 
