@@ -4,11 +4,14 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import httpx
 import zipfile
 import io
 from dataclasses import dataclass, field
 from enum import Enum
+
+from app.core.config import settings
 
 _7ZIP_PATHS = [
     r"C:\Program Files\7-Zip\7z.exe",
@@ -29,7 +32,6 @@ def _find_7zip() -> str | None:
 
 SIRE_BASE = "https://api-sire.sunat.gob.pe/v1/contribuyente/migeigv/libros"
 POLL_INTERVAL_SECONDS = 10
-POLL_MAX_ATTEMPTS = 360
 
 
 class TicketStatus(str, Enum):
@@ -196,10 +198,16 @@ async def poll_ticket(
     Manual SIRE Ventas 5.16 / Compras 5.31.
 
     get_token: async callable (force_refresh: bool) -> str.
-    El polling puede durar 30 min y SUNAT invalida el token si se emite otro
-    para el mismo usuario SOL — ante un 401 se renueva y se reintenta.
+    El polling puede durar hasta SUNAT_POLL_TIMEOUT_MINUTES; SUNAT invalida el
+    token si se emite otro para el mismo usuario SOL — ante un 401 se renueva.
+
+    El límite es de tiempo de reloj (no de número de intentos): así un SUNAT
+    lento que tarda en responder cada consulta no puede estirar la espera a
+    horas — corta al cumplirse el tope con un error claro.
     """
-    for _ in range(POLL_MAX_ATTEMPTS):
+    timeout_seconds = settings.SUNAT_POLL_TIMEOUT_MINUTES * 60
+    inicio = time.monotonic()
+    while time.monotonic() - inicio < timeout_seconds:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
         token = await get_token(False)
@@ -241,7 +249,11 @@ async def poll_ticket(
         if "error" in estado.lower():
             raise ValueError(f"SUNAT devolvió error en ticket {num_ticket}: {registro}")
 
-    raise TimeoutError(f"El ticket {num_ticket} no finalizó en {POLL_MAX_ATTEMPTS * POLL_INTERVAL_SECONDS}s")
+    raise TimeoutError(
+        f"SUNAT no terminó de generar la propuesta en "
+        f"{settings.SUNAT_POLL_TIMEOUT_MINUTES} minutos (ticket {num_ticket}). "
+        f"Puede estar lento o saturado; reintenta más tarde."
+    )
 
 
 async def download_file(

@@ -15,6 +15,8 @@ class Settings(BaseSettings):
 
     MAX_CONCURRENT_JOBS: int = 3
 
+    SUNAT_POLL_TIMEOUT_MINUTES: int = 90
+
     ENCRYPTION_KEY: str
 
     AUTH0_DOMAIN: str = ""
