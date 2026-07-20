@@ -372,7 +372,7 @@ async def _run_reconciliation_task(
 
     except Exception as exc:
         logger.exception("Job de conciliación #%s falló", job_id)
-        if isinstance(exc, ValueError):
+        if isinstance(exc, (ValueError, TimeoutError)):
             mensaje = str(exc)
         else:
             mensaje = (

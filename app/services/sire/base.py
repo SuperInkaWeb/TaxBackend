@@ -32,6 +32,8 @@ def _find_7zip() -> str | None:
 
 SIRE_BASE = "https://api-sire.sunat.gob.pe/v1/contribuyente/migeigv/libros"
 POLL_INTERVAL_SECONDS = 10
+DOWNLOAD_MAX_ATTEMPTS = 4
+DOWNLOAD_RETRY_PAUSE_SECONDS = 15
 
 
 class TicketStatus(str, Enum):
@@ -294,17 +296,46 @@ async def download_file(
         if info.cod_proceso is not None:
             params["codProceso"] = info.cod_proceso
 
-        token = await get_token(False)
-        async with httpx.AsyncClient(timeout=300) as client:
-            resp = await client.get(download_url, headers=_auth_headers(token), params=params)
-            if resp.status_code == 401:
-                token = await get_token(True)
-                resp = await client.get(download_url, headers=_auth_headers(token), params=params)
-            resp.raise_for_status()
-
-        partes_bytes.append((nombre, resp.content))
+        contenido = await _descargar_parte(get_token, download_url, params)
+        partes_bytes.append((nombre, contenido))
 
     return await asyncio.to_thread(_extract_txt_from_parts, partes_bytes)
+
+
+async def _descargar_parte(get_token, download_url: str, params: dict) -> bytes:
+    """
+    Descarga una parte del reporte con reintentos ante caídas transitorias de
+    SUNAT (5xx / errores de red), con pausa entre intentos. Renueva el token
+    ante 401. Si se agotan los intentos, propaga el último error.
+    """
+    ultimo_error: Exception | None = None
+    for intento in range(DOWNLOAD_MAX_ATTEMPTS):
+        token = await get_token(False)
+        try:
+            async with httpx.AsyncClient(timeout=300) as client:
+                resp = await client.get(download_url, headers=_auth_headers(token), params=params)
+        except httpx.TransportError as exc:
+            ultimo_error = exc
+            await asyncio.sleep(DOWNLOAD_RETRY_PAUSE_SECONDS)
+            continue
+
+        if resp.status_code == 401:
+            await get_token(True)
+            continue
+        if resp.status_code >= 500:
+            ultimo_error = httpx.HTTPStatusError(
+                f"SUNAT respondió {resp.status_code} al descargar el reporte",
+                request=resp.request, response=resp,
+            )
+            await asyncio.sleep(DOWNLOAD_RETRY_PAUSE_SECONDS)
+            continue
+
+        resp.raise_for_status()
+        return resp.content
+
+    if ultimo_error is not None:
+        raise ultimo_error
+    raise RuntimeError("No se pudo descargar el reporte de SUNAT tras varios intentos")
 
 
 def _extract_txt_from_parts(partes_bytes: list[tuple[str, bytes]]) -> bytes:
