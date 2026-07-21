@@ -333,9 +333,10 @@ async def _descargar_parte(get_token, download_url: str, params: dict) -> bytes:
         resp.raise_for_status()
         return resp.content
 
-    if ultimo_error is not None:
-        raise ultimo_error
-    raise RuntimeError("No se pudo descargar el reporte de SUNAT tras varios intentos")
+    raise ValueError(
+        f"SUNAT no pudo entregar el archivo de la propuesta tras {DOWNLOAD_MAX_ATTEMPTS} "
+        f"intentos. Puede estar lento o saturado; reintenta más tarde."
+    ) from ultimo_error
 
 
 def _extract_txt_from_parts(partes_bytes: list[tuple[str, bytes]]) -> bytes:
