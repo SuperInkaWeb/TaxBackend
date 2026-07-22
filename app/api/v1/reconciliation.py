@@ -1,4 +1,5 @@
 import asyncio
+import ctypes
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -186,7 +187,34 @@ async def _obtener_registros_empresa(
     )
 
 
-async def _run_reconciliation_task(
+def _liberar_memoria() -> None:
+    """
+    Devuelve al sistema operativo la memoria que el asignador de Python retiene
+    tras procesar millones de filas: sin esto el proceso conserva GB reservados
+    aunque el job ya terminó, y el hosting los cobra igual.
+
+    Solo aplica en Linux/glibc (el contenedor); en otros sistemas no hace nada.
+    """
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+async def _run_reconciliation_task(*args, **kwargs) -> None:
+    """
+    Envoltorio de la conciliación: al retornar la tarea, su frame se destruye y
+    con él los millones de registros; recién ahí tiene sentido pedirle al SO que
+    recupere la memoria (hacerlo dentro de la tarea no liberaría nada, porque
+    sus variables locales seguirían vivas).
+    """
+    try:
+        await _ejecutar_conciliacion(*args, **kwargs)
+    finally:
+        _liberar_memoria()
+
+
+async def _ejecutar_conciliacion(
     job_id: int,
     empresa_file_path: str,
     empresa_filename: str,
