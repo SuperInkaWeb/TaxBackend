@@ -264,12 +264,16 @@ async def download_file(
     info: TicketFileInfo,
     cod_libro: str,
     num_ticket: str,
-) -> bytes:
+) -> str:
     """
-    Descarga el ZIP generado por SUNAT y devuelve los bytes del primer TXT.
-    Manual SIRE Ventas 5.17 / Compras 5.32: endpoint archivoreporte.
-    Soporta ZIP particionado (.z01, .z02, ..., .zip) — descarga y ensambla todas las partes.
+    Descarga el ZIP generado por SUNAT y devuelve la RUTA a un archivo temporal
+    con el TXT extraído. Manual SIRE Ventas 5.17 / Compras 5.32.
 
+    La descarga es en streaming a disco: la RAM del proceso no crece con el
+    tamaño del archivo (importante para propuestas de millones de filas).
+    Soporta ZIP particionado (.z01, .z02, ..., .zip).
+
+    El llamador es responsable de borrar el archivo temporal devuelto.
     get_token: async callable (force_refresh: bool) -> str; renueva ante 401.
     """
     partes = info.archivo_reportes if info.archivo_reportes else [
@@ -279,59 +283,69 @@ async def download_file(
         }
     ]
 
-    partes_bytes: list[tuple[str, bytes]] = []
+    workdir = tempfile.mkdtemp(prefix="sunat_dl_")
+    try:
+        part_files: list[str] = []
+        for parte in partes:
+            nombre   = parte.get("nomArchivoReporte", "")
+            cod_tipo = parte.get("codTipoAchivoReporte") or parte.get("codTipoArchivoReporte")
 
-    for parte in partes:
-        nombre   = parte.get("nomArchivoReporte", "")
-        cod_tipo = parte.get("codTipoAchivoReporte") or parte.get("codTipoArchivoReporte")
+            params = {
+                "nomArchivoReporte": nombre,
+                "codLibro":          cod_libro,
+                "perTributario":     info.per_tributario,
+                "numTicket":         num_ticket,
+            }
+            if cod_tipo is not None:
+                params["codTipoArchivoReporte"] = cod_tipo
+            if info.cod_proceso is not None:
+                params["codProceso"] = info.cod_proceso
 
-        params = {
-            "nomArchivoReporte": nombre,
-            "codLibro":          cod_libro,
-            "perTributario":     info.per_tributario,
-            "numTicket":         num_ticket,
-        }
-        if cod_tipo is not None:
-            params["codTipoArchivoReporte"] = cod_tipo
-        if info.cod_proceso is not None:
-            params["codProceso"] = info.cod_proceso
+            dest = os.path.join(workdir, nombre or f"parte_{len(part_files)}")
+            await _descargar_parte_a_disco(get_token, download_url, params, dest)
+            part_files.append(dest)
 
-        contenido = await _descargar_parte(get_token, download_url, params)
-        partes_bytes.append((nombre, contenido))
-
-    return await asyncio.to_thread(_extract_txt_from_parts, partes_bytes)
+        return await asyncio.to_thread(_extraer_txt_a_archivo, part_files)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
-async def _descargar_parte(get_token, download_url: str, params: dict) -> bytes:
+async def _descargar_parte_a_disco(get_token, download_url: str, params: dict, dest_path: str) -> None:
     """
-    Descarga una parte del reporte con reintentos ante caídas transitorias de
-    SUNAT (5xx / errores de red), con pausa entre intentos. Renueva el token
-    ante 401. Si se agotan los intentos, propaga el último error.
+    Descarga una parte del reporte en streaming directo a disco (RAM constante),
+    con reintentos ante caídas transitorias de SUNAT (5xx / red) y renovación de
+    token ante 401. Si se agotan los intentos, propaga el último error.
     """
     ultimo_error: Exception | None = None
     for intento in range(DOWNLOAD_MAX_ATTEMPTS):
         token = await get_token(False)
         try:
             async with httpx.AsyncClient(timeout=300) as client:
-                resp = await client.get(download_url, headers=_auth_headers(token), params=params)
+                async with client.stream(
+                    "GET", download_url, headers=_auth_headers(token), params=params
+                ) as resp:
+                    if resp.status_code == 401:
+                        await get_token(True)
+                        continue
+                    if resp.status_code >= 500:
+                        ultimo_error = httpx.HTTPStatusError(
+                            f"SUNAT respondió {resp.status_code} al descargar el reporte",
+                            request=resp.request, response=resp,
+                        )
+                        await asyncio.sleep(DOWNLOAD_RETRY_PAUSE_SECONDS)
+                        continue
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        resp.raise_for_status()
+
+                    with open(dest_path, "wb") as f:
+                        async for chunk in resp.aiter_bytes(1024 * 1024):
+                            f.write(chunk)
+                    return
         except httpx.TransportError as exc:
             ultimo_error = exc
             await asyncio.sleep(DOWNLOAD_RETRY_PAUSE_SECONDS)
             continue
-
-        if resp.status_code == 401:
-            await get_token(True)
-            continue
-        if resp.status_code >= 500:
-            ultimo_error = httpx.HTTPStatusError(
-                f"SUNAT respondió {resp.status_code} al descargar el reporte",
-                request=resp.request, response=resp,
-            )
-            await asyncio.sleep(DOWNLOAD_RETRY_PAUSE_SECONDS)
-            continue
-
-        resp.raise_for_status()
-        return resp.content
 
     raise ValueError(
         f"SUNAT no pudo entregar el archivo de la propuesta tras {DOWNLOAD_MAX_ATTEMPTS} "
@@ -339,32 +353,37 @@ async def _descargar_parte(get_token, download_url: str, params: dict) -> bytes:
     ) from ultimo_error
 
 
-def _extract_txt_from_parts(partes_bytes: list[tuple[str, bytes]]) -> bytes:
-    """Extrae el TXT del ZIP (simple o particionado). Corre en hilo aparte."""
-    if len(partes_bytes) == 1:
-        with zipfile.ZipFile(io.BytesIO(partes_bytes[0][1])) as zf:
-            txt_files = [f for f in zf.namelist() if f.lower().endswith(".txt")]
-            target    = txt_files[0] if txt_files else (zf.namelist()[0] if zf.namelist() else None)
-            if not target:
-                raise ValueError("El ZIP de SUNAT no contiene ningún archivo")
-            return zf.read(target)
+def _extraer_txt_a_archivo(part_files: list[str]) -> str:
+    """
+    Extrae el TXT del ZIP (simple o particionado) a un archivo temporal
+    persistente y devuelve su ruta. Trabaja sobre disco: no carga el ZIP en RAM.
+    Corre en un hilo aparte.
+    """
+    fd, txt_path = tempfile.mkstemp(suffix=".txt")
+    os.close(fd)
+    try:
+        if len(part_files) == 1:
+            with zipfile.ZipFile(part_files[0]) as zf:
+                nombres = zf.namelist()
+                txts = [f for f in nombres if f.lower().endswith(".txt")]
+                target = txts[0] if txts else (nombres[0] if nombres else None)
+                if not target:
+                    raise ValueError("El ZIP de SUNAT no contiene ningún archivo")
+                with zf.open(target) as src, open(txt_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst, 1024 * 1024)
+            return txt_path
 
-    bin_7z = _find_7zip()
-    if not bin_7z:
-        raise RuntimeError(
-            "ZIP particionado recibido de SUNAT pero 7-zip no está instalado. "
-            "Windows: instalar https://www.7-zip.org/ | Linux: apt install p7zip-full"
-        )
+        bin_7z = _find_7zip()
+        if not bin_7z:
+            raise RuntimeError(
+                "ZIP particionado recibido de SUNAT pero 7-zip no está instalado. "
+                "Windows: instalar https://www.7-zip.org/ | Linux: apt install p7zip-full"
+            )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        partes_bytes.sort(key=lambda t: os.path.splitext(t[0])[1].lower())
-        for nombre, data in partes_bytes:
-            with open(os.path.join(tmpdir, nombre), "wb") as f:
-                f.write(data)
-
-        primer = os.path.join(tmpdir, partes_bytes[0][0])
+        part_files.sort(key=lambda p: os.path.splitext(p)[1].lower())
+        workdir = os.path.dirname(part_files[0])
         result = subprocess.run(
-            [bin_7z, "e", primer, f"-o{tmpdir}", "-y", "-aoa"],
+            [bin_7z, "e", part_files[0], f"-o{workdir}", "-y", "-aoa"],
             capture_output=True, timeout=300,
         )
         if result.returncode != 0:
@@ -372,13 +391,20 @@ def _extract_txt_from_parts(partes_bytes: list[tuple[str, bytes]]) -> bytes:
                 f"7-zip falló ({result.returncode}): {result.stderr.decode(errors='replace')[:500]}"
             )
 
-        txt_files = [f for f in os.listdir(tmpdir) if f.lower().endswith(".txt")]
-        if not txt_files:
-            archivos = os.listdir(tmpdir)
-            if not archivos:
-                raise ValueError("7-zip no extrajo ningún archivo")
-            no_partes = [f for f in archivos if not re.match(r".*\.(z\d+|zip)$", f.lower())]
-            txt_files = no_partes if no_partes else archivos
-
-        with open(os.path.join(tmpdir, txt_files[0]), "rb") as f:
-            return f.read()
+        nombres_partes = {os.path.basename(p) for p in part_files}
+        extraidos = [
+            f for f in os.listdir(workdir)
+            if f not in nombres_partes and not re.match(r".*\.(z\d+|zip)$", f.lower())
+        ]
+        txts = [f for f in extraidos if f.lower().endswith(".txt")]
+        elegido = txts[0] if txts else (extraidos[0] if extraidos else None)
+        if not elegido:
+            raise ValueError("7-zip no extrajo ningún archivo")
+        os.replace(os.path.join(workdir, elegido), txt_path)
+        return txt_path
+    except Exception:
+        try:
+            os.remove(txt_path)
+        except OSError:
+            pass
+        raise

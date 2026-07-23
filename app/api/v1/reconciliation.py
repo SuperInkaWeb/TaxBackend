@@ -4,7 +4,6 @@ import json
 import logging
 import multiprocessing
 import os
-import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -280,16 +279,9 @@ async def _ejecutar_conciliacion(
             db.close()
 
         # Fase 2a: descarga de SUNAT (polling + ZIP, puede durar decenas de
-        # minutos). Los bytes se escriben a un archivo temporal y se liberan de
-        # inmediato: el servidor no retiene la propuesta en memoria.
-        sunat_bytes = await descargar(get_token, num_ticket, periodo)
-        fd, sunat_tmp_path = tempfile.mkstemp(suffix=".txt")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(sunat_bytes)
-        finally:
-            del sunat_bytes
-        _liberar_memoria()
+        # minutos). Se baja en streaming a disco: la propuesta NUNCA se carga
+        # entera en la RAM del servidor. Devuelve la ruta al TXT temporal.
+        sunat_tmp_path = await descargar(get_token, num_ticket, periodo)
 
         # Fase 2b: parseo + conciliación + generación de reportes en un
         # SUBPROCESO. Todo el pico de RAM (millones de filas) vive ahí; cuando

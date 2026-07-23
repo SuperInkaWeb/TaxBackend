@@ -47,9 +47,10 @@ async def consultar_ticket_ventas(get_token, num_ticket: str, periodo: str) -> t
     )
 
 
-async def descargar_ticket_ventas(get_token, num_ticket: str, periodo: str) -> bytes:
+async def descargar_ticket_ventas(get_token, num_ticket: str, periodo: str) -> str:
     """
-    Fases 2-3 RVIE: polling del ticket hasta Terminado + descarga del ZIP → TXT bytes.
+    Fases 2-3 RVIE: polling del ticket hasta Terminado + descarga del ZIP.
+    Devuelve la RUTA a un archivo temporal con el TXT (el llamador lo borra).
     """
     info = await poll_ticket(
         get_token,
@@ -67,7 +68,7 @@ async def descargar_ticket_ventas(get_token, num_ticket: str, periodo: str) -> b
     )
 
 
-async def descargar_propuesta_ventas(get_token, periodo: str, ruc: str) -> bytes:
+async def descargar_propuesta_ventas(get_token, periodo: str, ruc: str) -> str:
     """
     Flujo completo RVIE (fase 1 + fases 2-3).
 
