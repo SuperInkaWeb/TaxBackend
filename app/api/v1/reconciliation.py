@@ -2,6 +2,10 @@ import asyncio
 import ctypes
 import json
 import logging
+import multiprocessing
+import os
+import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status
@@ -24,12 +28,12 @@ from app.services.sire.ventas import (
     solicitar_export_ventas, consultar_ticket_ventas, descargar_ticket_ventas,
 )
 from app.models.file_mapping import CompanyFileMapping
-from app.services.parser.empresa_file import parse_empresa_file, KNOWN_FORMAT_COLUMNS_HELP, PLE81_FORMAT_HELP
-from app.services.parser.mapeo import parse_con_columnas, validar_mapeo
-from app.services.parser.sunat_propuesta import parse_sunat_propuesta
-from app.services.reconciliation.engine import reconcile
-from app.services.report.excel_generator import generate_excel, generate_csv_b, generate_csv_d, EXCEL_B_LIMIT, EXCEL_D_LIMIT
+from app.services.reconciliation.worker import procesar_conciliacion
 from app.storage import storage
+
+# Los subprocesos se crean con "spawn" (no "fork"): fork dentro de un servidor
+# async con hilos puede provocar deadlocks; spawn arranca un intérprete limpio.
+_MP_CONTEXT = multiprocessing.get_context("spawn")
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
 logger = logging.getLogger("sire.reconciliation")
@@ -128,63 +132,25 @@ def _buscar_ticket_fresco(
     return query.order_by(ReconciliationJob.id.desc()).first()
 
 
-async def _obtener_registros_empresa(
-    db,
-    empresa_file_path: str,
-    empresa_filename: str,
-    company_id: int,
-    tipo_libro: TipoLibro,
-    mapeo_config: dict | None,
-) -> list:
+def _resolver_mapeo_guardado(db, company_id: int, tipo_libro: TipoLibro) -> dict | None:
     """
-    Lee el archivo de la empresa y lo convierte en registros según el mapeo
-    aplicable (explícito, formato conocido o guardado de la empresa).
-    Al retornar, el contenido crudo del archivo sale de scope y libera RAM.
+    Devuelve el mapeo guardado de la empresa como dict plano (o None). Se
+    resuelve en el proceso principal para pasarlo al subproceso, que no tiene BD.
     """
-    contenido = await asyncio.to_thread(storage.read, empresa_file_path)
-
-    async def _parse_con(config: dict) -> list:
-        val = await asyncio.to_thread(validar_mapeo, contenido, config, tipo_libro.value)
-        if not val["ok"]:
-            detalle = "; ".join(val["avisos"]) if val["avisos"] else f"faltan campos: {val['faltantes']}"
-            raise ValueError(f"El mapeo de columnas no supera la validación: {detalle}")
-        recs = await asyncio.to_thread(parse_con_columnas, contenido, config, tipo_libro.value)
-        if not recs:
-            raise ValueError("No se extrajo ningún registro con el mapeo de columnas configurado.")
-        return recs
-
-    if mapeo_config is not None:
-        return await _parse_con(mapeo_config)
-
-    registros, used_mapping = await asyncio.to_thread(
-        parse_empresa_file, contenido, empresa_filename, None, tipo_libro.value
-    )
-    if used_mapping.known_format:
-        return registros
-
-    saved_model = db.query(CompanyFileMapping).filter(
+    saved = db.query(CompanyFileMapping).filter(
         CompanyFileMapping.company_id == company_id,
         CompanyFileMapping.tipo_libro == tipo_libro.value,
     ).first()
-    if saved_model and saved_model.columnas and saved_model.confirmed_by_user:
-        return await _parse_con({
-            "delimiter": saved_model.delimiter,
-            "encoding": saved_model.encoding,
-            "has_header": saved_model.has_header,
-            "skip_rows": saved_model.skip_rows,
-            "serie_numero_combinado": saved_model.serie_numero_combinado,
-            "columnas": saved_model.columnas,
-        })
-
-    formato_esperado = (
-        PLE81_FORMAT_HELP if tipo_libro == TipoLibro.compras
-        else f"CSV con las columnas: {KNOWN_FORMAT_COLUMNS_HELP}"
-    )
-    detalle = "; ".join(used_mapping.warnings) or "formato no reconocido"
-    raise ValueError(
-        f"El archivo no tiene el formato esperado para {tipo_libro.value}. "
-        f"{detalle}. Formato esperado: {formato_esperado}."
-    )
+    if saved and saved.columnas and saved.confirmed_by_user:
+        return {
+            "delimiter": saved.delimiter,
+            "encoding": saved.encoding,
+            "has_header": saved.has_header,
+            "skip_rows": saved.skip_rows,
+            "serie_numero_combinado": saved.serie_numero_combinado,
+            "columnas": saved.columnas,
+        }
+    return None
 
 
 def _liberar_memoria() -> None:
@@ -255,8 +221,9 @@ async def _ejecutar_conciliacion(
             job.status = JobStatus.procesando
             db.commit()
 
-            empresa_records = await _obtener_registros_empresa(
-                db, empresa_file_path, empresa_filename, company_id, tipo_libro, mapeo_config
+            saved_mapping = (
+                _resolver_mapeo_guardado(db, company_id, tipo_libro)
+                if mapeo_config is None else None
             )
 
             ruc = company.ruc
@@ -312,53 +279,47 @@ async def _ejecutar_conciliacion(
         finally:
             db.close()
 
-        # Fase 2: descarga (polling + ZIP, puede durar decenas de minutos),
-        # parseo, conciliación y generación de reportes. SIN conexión a la BD.
-        contenedor = [await descargar(get_token, num_ticket, periodo)]
+        # Fase 2a: descarga de SUNAT (polling + ZIP, puede durar decenas de
+        # minutos). Los bytes se escriben a un archivo temporal y se liberan de
+        # inmediato: el servidor no retiene la propuesta en memoria.
+        sunat_bytes = await descargar(get_token, num_ticket, periodo)
+        fd, sunat_tmp_path = tempfile.mkstemp(suffix=".txt")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(sunat_bytes)
+        finally:
+            del sunat_bytes
+        _liberar_memoria()
 
-        sunat_records = await asyncio.to_thread(
-            lambda: parse_sunat_propuesta(contenedor.pop(), tipo_libro.value)
-        )
-
-        recon_output = await asyncio.to_thread(
-            reconcile, empresa_records, sunat_records, tipo_libro.value,
-            set(cobertura_fechas) if cobertura_fechas is not None else None,
-        )
-
-        excel_bytes = await asyncio.to_thread(
-            generate_excel,
-            output=recon_output,
-            empresa_nombre=empresa_nombre,
-            ruc=ruc,
-            periodo=periodo,
-            tipo_libro=tipo_libro.value,
-            propuesta_generada=propuesta_origen_at,
-            cobertura=_descripcion_cobertura(cobertura_fechas),
-        )
-
-        csv_b_bytes = None
-        if len(recon_output.scenario_b) > EXCEL_B_LIMIT:
-            csv_b_bytes = await asyncio.to_thread(generate_csv_b, recon_output, tipo_libro.value)
-
-        csv_d_bytes = None
-        if len(recon_output.scenario_d) > EXCEL_D_LIMIT:
-            csv_d_bytes = await asyncio.to_thread(generate_csv_d, recon_output, tipo_libro.value)
-
-        filename_xlsx = f"{ruc}_{periodo}_{tipo_libro.value}.xlsx"
-        path_xlsx = f"reportes/{company_id}/{job_id}/{filename_xlsx}"
-        storage.save(path_xlsx, excel_bytes)
-
-        path_csv = None
-        if csv_b_bytes is not None:
-            filename_csv = f"{ruc}_{periodo}_{tipo_libro.value}_B.csv"
-            path_csv = f"reportes/{company_id}/{job_id}/{filename_csv}"
-            storage.save(path_csv, csv_b_bytes)
-
-        path_csv_d = None
-        if csv_d_bytes is not None:
-            filename_csv_d = f"{ruc}_{periodo}_{tipo_libro.value}_D.csv"
-            path_csv_d = f"reportes/{company_id}/{job_id}/{filename_csv_d}"
-            storage.save(path_csv_d, csv_d_bytes)
+        # Fase 2b: parseo + conciliación + generación de reportes en un
+        # SUBPROCESO. Todo el pico de RAM (millones de filas) vive ahí; cuando
+        # el subproceso muere, el SO recupera el 100% de esa memoria — el
+        # servidor se mantiene liviano y no acumula GB entre conciliaciones.
+        payload = {
+            "empresa_file_path": empresa_file_path,
+            "empresa_filename": empresa_filename,
+            "sunat_tmp_path": sunat_tmp_path,
+            "tipo_libro": tipo_libro.value,
+            "mapeo_config": mapeo_config,
+            "saved_mapping": saved_mapping,
+            "cobertura_fechas": cobertura_fechas,
+            "cobertura_desc": _descripcion_cobertura(cobertura_fechas),
+            "ruc": ruc,
+            "empresa_nombre": empresa_nombre,
+            "periodo": periodo,
+            "propuesta_origen_at": propuesta_origen_at,
+            "company_id": company_id,
+            "job_id": job_id,
+        }
+        loop = asyncio.get_running_loop()
+        try:
+            with ProcessPoolExecutor(max_workers=1, mp_context=_MP_CONTEXT) as executor:
+                resultado = await loop.run_in_executor(executor, procesar_conciliacion, payload)
+        finally:
+            try:
+                os.remove(sunat_tmp_path)
+            except OSError:
+                pass
 
         if empresa_file_path_guardado:
             try:
@@ -372,22 +333,22 @@ async def _ejecutar_conciliacion(
         try:
             db.add(ReconciliationResult(
                 job_id=job_id,
-                escenario_a_count=len(recon_output.scenario_a),
-                escenario_b_count=len(recon_output.scenario_b),
-                escenario_c_count=len(recon_output.scenario_c),
-                escenario_d_count=len(recon_output.scenario_d),
-                igv_diferencia_total=recon_output.igv_diferencia_total,
-                tiene_alertas_rojas=recon_output.tiene_alertas_rojas,
+                escenario_a_count=resultado["escenario_a_count"],
+                escenario_b_count=resultado["escenario_b_count"],
+                escenario_c_count=resultado["escenario_c_count"],
+                escenario_d_count=resultado["escenario_d_count"],
+                igv_diferencia_total=resultado["igv_diferencia_total"],
+                tiene_alertas_rojas=resultado["tiene_alertas_rojas"],
             ))
             db.add(ReportFile(
                 job_id=job_id,
-                filename=filename_xlsx,
-                storage_path=path_xlsx,
-                file_size_bytes=len(excel_bytes),
-                csv_b_storage_path=path_csv,
-                csv_b_file_size_bytes=len(csv_b_bytes) if csv_b_bytes is not None else None,
-                csv_d_storage_path=path_csv_d,
-                csv_d_file_size_bytes=len(csv_d_bytes) if csv_d_bytes is not None else None,
+                filename=resultado["filename_xlsx"],
+                storage_path=resultado["path_xlsx"],
+                file_size_bytes=resultado["excel_size"],
+                csv_b_storage_path=resultado["path_csv"],
+                csv_b_file_size_bytes=resultado["csv_b_size"],
+                csv_d_storage_path=resultado["path_csv_d"],
+                csv_d_file_size_bytes=resultado["csv_d_size"],
             ))
             job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
             if job:
