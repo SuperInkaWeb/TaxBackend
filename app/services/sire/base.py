@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -12,6 +13,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 _7ZIP_PATHS = [
     r"C:\Program Files\7-Zip\7z.exe",
@@ -34,6 +37,10 @@ SIRE_BASE = "https://api-sire.sunat.gob.pe/v1/contribuyente/migeigv/libros"
 POLL_INTERVAL_SECONDS = 10
 DOWNLOAD_MAX_ATTEMPTS = 4
 DOWNLOAD_RETRY_PAUSE_SECONDS = 15
+# SUNAT limita la frecuencia de solicitudes de propuesta (HTTP 429). Ante 429
+# se espera (respetando Retry-After si viene) y se reintenta.
+EXPORT_MAX_INTENTOS_429 = 6
+EXPORT_BACKOFF_BASE_SECONDS = 15
 
 
 class TicketStatus(str, Enum):
@@ -85,6 +92,39 @@ def _auth_headers(token: str) -> dict:
         "Content-Type":  "application/json",
         "Accept":        "application/json",
     }
+
+
+def _retry_after_segundos(resp: "httpx.Response") -> int | None:
+    ra = resp.headers.get("Retry-After", "").strip()
+    return int(ra) if ra.isdigit() else None
+
+
+async def solicitar_export(get_token, url: str, params: dict, context: str) -> str:
+    """
+    GET a exportapropuesta con reintentos. Maneja:
+      - 401: renueva el token y reintenta;
+      - 429: SUNAT limita la frecuencia de solicitudes de propuesta; espera
+        (Retry-After si viene, si no un backoff creciente) y reintenta.
+    Devuelve el numTicket. Centraliza el comportamiento para compras y ventas.
+    """
+    token = await get_token(False)
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = None
+        for intento in range(EXPORT_MAX_INTENTOS_429):
+            resp = await client.get(url, headers=_auth_headers(token), params=params)
+            if resp.status_code == 401:
+                token = await get_token(True)
+                resp = await client.get(url, headers=_auth_headers(token), params=params)
+            if resp.status_code == 429 and intento < EXPORT_MAX_INTENTOS_429 - 1:
+                espera = _retry_after_segundos(resp) or EXPORT_BACKOFF_BASE_SECONDS * (intento + 1)
+                logger.warning(
+                    "SUNAT 429 (límite de solicitudes) en %s; espero %ss y reintento (%s/%s)",
+                    context, espera, intento + 1, EXPORT_MAX_INTENTOS_429 - 1,
+                )
+                await asyncio.sleep(espera)
+                continue
+            break
+    return _extract_ticket(resp, context)
 
 
 def _extract_file_info(registro: dict, periodo: str) -> TicketFileInfo:

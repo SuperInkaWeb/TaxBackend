@@ -60,6 +60,46 @@ def _parsear_empresa(contenido: bytes, empresa_filename: str, tipo_libro: str,
     )
 
 
+def _meses_anteriores(periodo: str, n: int) -> set[str]:
+    """Los n periodos AAAAMM inmediatamente anteriores a `periodo`."""
+    y, m = int(periodo[:4]), int(periodo[4:6])
+    out: set[str] = set()
+    for _ in range(n):
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+        out.add(f"{y:04d}{m:02d}")
+    return out
+
+
+def extraer_periodos_emision(payload: dict) -> list[str]:
+    """
+    Sondeo para compras "sin SIRE" (corre en un subproceso propio, así la RAM
+    del parseo se libera al terminar): devuelve los periodos AAAAMM distintos de
+    las fechas de emisión del archivo de la empresa que caen en los 12 meses
+    anteriores al periodo conciliado (excluye el propio periodo). Son las
+    propuestas que habrá que descargar para reubicar los comprobantes rezagados.
+    """
+    periodo = payload["periodo"]
+    contenido = storage.read(payload["empresa_file_path"])
+    empresa_records = _parsear_empresa(
+        contenido, payload["empresa_filename"], payload["tipo_libro"],
+        payload["mapeo_config"], payload["saved_mapping"],
+    )
+    del contenido
+
+    candidatos = _meses_anteriores(periodo, 12)
+    meses: set[str] = set()
+    for r in empresa_records:
+        f = r.fecha_emision
+        if f and len(f) >= 7 and f[:4].isdigit() and f[5:7].isdigit():
+            mes = f[:4] + f[5:7]
+            if mes in candidatos:
+                meses.add(mes)
+    return sorted(meses)
+
+
 def procesar_conciliacion(payload: dict) -> dict:
     """
     Punto de entrada del subproceso. Recibe un payload plano (picklable) y
@@ -83,8 +123,21 @@ def procesar_conciliacion(payload: dict) -> dict:
     sunat_records = parse_sunat_propuesta(sunat_bytes, tipo_libro)
     del sunat_bytes
 
+    # Compras "sin SIRE": propuestas de meses anteriores para reubicar los
+    # comprobantes rezagados (cada una es la ruta a un TXT ya descargado).
+    sunat_extra = None
+    extra_paths = payload.get("sunat_extra_paths") or {}
+    if extra_paths:
+        sunat_extra = {}
+        for periodo_extra, ruta in extra_paths.items():
+            with open(ruta, "rb") as f:
+                sunat_extra[periodo_extra] = parse_sunat_propuesta(f.read(), tipo_libro)
+
     cobertura = set(payload["cobertura_fechas"]) if payload["cobertura_fechas"] is not None else None
-    recon_output = reconcile(empresa_records, sunat_records, tipo_libro, cobertura)
+    recon_output = reconcile(
+        empresa_records, sunat_records, tipo_libro, cobertura,
+        sunat_extra=sunat_extra, periodo=payload["periodo"],
+    )
     del empresa_records, sunat_records
 
     excel_bytes = generate_excel(
@@ -95,6 +148,8 @@ def procesar_conciliacion(payload: dict) -> dict:
         tipo_libro=tipo_libro,
         propuesta_generada=payload["propuesta_origen_at"],
         cobertura=payload["cobertura_desc"],
+        sin_sire=bool(payload.get("sin_sire")),
+        meses_no_disponibles=payload.get("sunat_extra_fallidos"),
     )
     filename_xlsx = f"{ruc}_{periodo}_{tipo_libro}.xlsx"
     path_xlsx = f"reportes/{company_id}/{job_id}/{filename_xlsx}"

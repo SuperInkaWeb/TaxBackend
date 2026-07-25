@@ -30,6 +30,11 @@ THIN_BORDER = Border(
 
 NUM_FMT = "#,##0.00"
 
+
+def _fmt_periodo(p: str) -> str:
+    """'202605' → '2026-05'. Vacío se queda vacío."""
+    return f"{p[:4]}-{p[4:]}" if p and len(p) == 6 else (p or "")
+
 EXCEL_FORMAT_LIMIT  = 50_000
 EXCEL_B_LIMIT       = 10_000
 EXCEL_D_LIMIT       = 10_000
@@ -85,6 +90,8 @@ def generate_excel(
     tipo_libro: str,
     propuesta_generada: datetime | None = None,
     cobertura: str | None = None,
+    sin_sire: bool = False,
+    meses_no_disponibles: list[str] | None = None,
 ) -> bytes:
     wb = Workbook()
 
@@ -92,6 +99,12 @@ def generate_excel(
     cnt_b = len(output.scenario_b)
     cnt_c = len(output.scenario_c)
     cnt_d = len(output.scenario_d)
+    # Comprobantes reubicados por la modalidad "sin SIRE" (hallados en la
+    # propuesta de otro mes que el conciliado).
+    reubicados = (
+        sum(1 for r in output.scenario_c if r.periodo_hallazgo)
+        + sum(1 for r in output.scenario_d if r.periodo_hallazgo)
+    )
 
     ws = wb.active
     ws.title = "Resumen"
@@ -116,6 +129,8 @@ def generate_excel(
         ("Periodo",       f"{periodo[:4]}/{periodo[4:]}"),
         ("Tipo de libro", "Ventas (RVIE)" if tipo_libro == "ventas" else "Compras (RCE)"),
     ]
+    if sin_sire:
+        datos.append(("Modalidad", "Sin SIRE — búsqueda en propuestas de meses anteriores"))
     if cobertura is not None:
         datos.append(("Cobertura del archivo", cobertura))
     if propuesta_generada is not None:
@@ -189,6 +204,28 @@ def generate_excel(
     r += 1
 
     notas = []
+    if meses_no_disponibles:
+        meses_txt = ", ".join(_fmt_periodo(m) for m in sorted(meses_no_disponibles))
+        notas.append((
+            f"⚠ No se pudo obtener la propuesta SUNAT de {len(meses_no_disponibles)} mes(es): {meses_txt}",
+            "Sus comprobantes permanecen en el Escenario A SIN haberse verificado contra ese mes "
+            "(SUNAT puede no tener la propuesta generada aún). No los tomes como faltantes "
+            "confirmados hasta poder consultarlos.",
+        ))
+    if sin_sire:
+        if reubicados:
+            notas.append((
+                f"Modalidad sin SIRE: {reubicados:,} comprobante(s) reubicados",
+                "Estaban ausentes en la propuesta del periodo pero se hallaron en la de su "
+                "mes de emisión; pasaron a C o D (ver columna «Hallado en periodo»). Los que "
+                "no aparecieron en ningún mes permanecen en A.",
+            ))
+        else:
+            notas.append((
+                "Modalidad sin SIRE: sin reubicaciones",
+                "Se buscaron los comprobantes del Escenario A en las propuestas de sus meses "
+                "de emisión; ninguno se encontró, así que todos permanecen en A.",
+            ))
     if output.total_excluidos:
         detalle = ", ".join(
             f"{TIPO_LABELS.get(t, t)} ({t}): {c:,}"
@@ -347,8 +384,12 @@ def generate_excel(
         "valor_adq_ng": "Adq. no gravadas", "moneda": "Moneda", "tipo_cambio": "Tipo de cambio",
     }
 
+    # Solo compras "sin SIRE": comprobantes reubicados en la propuesta de otro mes.
+    hay_hallazgo_c = es_compras and any(r.periodo_hallazgo for r in output.scenario_c)
+    hay_hallazgo_d = es_compras and any(r.periodo_hallazgo for r in output.scenario_d)
+
     if es_compras:
-        _set_header_row(ws_c, [
+        headers_c = [
             "Tipo", "Serie", "Número", "RUC Proveedor", "Proveedor",
             "Fecha (tu archivo)", "Fecha (SUNAT)",
             "BI DG (tu archivo)", "BI DG (SUNAT)",
@@ -362,7 +403,10 @@ def generate_excel(
             "Moneda (tu archivo)", "Moneda (SUNAT)",
             "TC (tu archivo)", "TC (SUNAT)",
             "Campos con diferencia", "Alerta",
-        ])
+        ]
+        if hay_hallazgo_c:
+            headers_c.append("Hallado en periodo")
+        _set_header_row(ws_c, headers_c)
         CAMPO_COLS = {
             "fecha": (6, 7), "base_imponible": (8, 9), "igv": (10, 11),
             "bi_dgng": (12, 13), "igv_dgng": (14, 15),
@@ -432,6 +476,8 @@ def generate_excel(
                 campos_txt,
                 "ROJO" if rec.es_alerta_roja else "ÁMBAR",
             ]
+        if hay_hallazgo_c:
+            values.append(_fmt_periodo(rec.periodo_hallazgo))
         diff_cols = {col for campo in campos for col in CAMPO_COLS.get(campo, ())}
 
         for col_idx, val in enumerate(values, 1):
@@ -448,7 +494,7 @@ def generate_excel(
 
     ws_d = wb.create_sheet("D - Coinciden OK")
     if es_compras:
-        _set_header_row(ws_d, [
+        headers_d = [
             "Tipo", "Serie", "Número", "RUC Proveedor", "Proveedor",
             "Fecha (tu archivo)", "Fecha (SUNAT)",
             "BI DG (tu archivo)", "BI DG (SUNAT)",
@@ -456,7 +502,10 @@ def generate_excel(
             "Total (tu archivo)", "Total (SUNAT)",
             "Moneda (tu archivo)", "Moneda (SUNAT)",
             "TC (tu archivo)", "TC (SUNAT)",
-        ])
+        ]
+        if hay_hallazgo_d:
+            headers_d.append("Hallado en periodo")
+        _set_header_row(ws_d, headers_d)
         n_cols_d = 17
         num_cols_d = [8, 9, 10, 11, 12, 13, 16, 17]
     else:
@@ -494,6 +543,8 @@ def generate_excel(
                 rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
                 rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
             ]
+        if hay_hallazgo_d:
+            values.append(_fmt_periodo(rec.periodo_hallazgo))
         for col_idx, val in enumerate(values, 1):
             cell = ws_d.cell(row=row_idx, column=col_idx, value=val)
             if use_fmt_d:
@@ -539,10 +590,11 @@ def generate_csv_b(output: ReconciliationOutput, tipo_libro: str = "ventas") -> 
 def generate_csv_d(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
     """CSV completo del Escenario D — solo se genera cuando D supera EXCEL_D_LIMIT."""
     es_compras = tipo_libro == "compras"
+    hay_hallazgo = es_compras and any(r.periodo_hallazgo for r in output.scenario_d)
     buf = io.StringIO()
     w = csv.writer(buf)
     if es_compras:
-        w.writerow([
+        header = [
             "Tipo CDP", "Serie", "Numero", "RUC Proveedor", "Proveedor",
             "Fecha (Empresa)", "Fecha (SUNAT)",
             "BI DG (Empresa)", "BI DG (SUNAT)",
@@ -550,9 +602,12 @@ def generate_csv_d(output: ReconciliationOutput, tipo_libro: str = "ventas") -> 
             "Importe Total (Empresa)", "Importe Total (SUNAT)",
             "Moneda (Empresa)", "Moneda (SUNAT)",
             "TC (Empresa)", "TC (SUNAT)",
-        ])
+        ]
+        if hay_hallazgo:
+            header.append("Hallado en periodo")
+        w.writerow(header)
         for rec in output.scenario_d:
-            w.writerow([
+            fila = [
                 rec.tipo_cdp, rec.serie, rec.numero, rec.ruc_proveedor, rec.razon_social,
                 rec.fecha_emision_empresa, rec.fecha_emision_sunat,
                 rec.base_imponible_empresa, rec.base_imponible_sunat,
@@ -560,7 +615,10 @@ def generate_csv_d(output: ReconciliationOutput, tipo_libro: str = "ventas") -> 
                 rec.importe_total_empresa, rec.importe_total_sunat,
                 rec.moneda_empresa, rec.moneda_sunat,
                 rec.tipo_cambio_empresa, rec.tipo_cambio_sunat,
-            ])
+            ]
+            if hay_hallazgo:
+                fila.append(_fmt_periodo(rec.periodo_hallazgo))
+            w.writerow(fila)
     else:
         w.writerow([
             "Tipo CDP", "Serie", "Numero",

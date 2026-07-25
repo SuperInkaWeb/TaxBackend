@@ -27,7 +27,7 @@ from app.services.sire.ventas import (
     solicitar_export_ventas, consultar_ticket_ventas, descargar_ticket_ventas,
 )
 from app.models.file_mapping import CompanyFileMapping
-from app.services.reconciliation.worker import procesar_conciliacion
+from app.services.reconciliation.worker import procesar_conciliacion, extraer_periodos_emision
 from app.storage import storage
 
 # Los subprocesos se crean con "spawn" (no "fork"): fork dentro de un servidor
@@ -131,6 +131,37 @@ def _buscar_ticket_fresco(
     return query.order_by(ReconciliationJob.id.desc()).first()
 
 
+def _buscar_tickets_frescos_multi(
+    db: Session,
+    company_id: int,
+    periodos: list[str],
+    tipo_libro: TipoLibro,
+    exclude_job_id: int | None = None,
+) -> dict[str, str]:
+    """
+    Para compras "sin SIRE": último num_ticket fresco (< 24h) de la empresa por
+    cada periodo pedido, tomado de cualquier otro job (normal o sin SIRE) cuyo
+    periodo principal coincida. {periodo: num_ticket} solo con los que se hallaron.
+    """
+    if not periodos:
+        return {}
+    limite = datetime.now(timezone.utc) - timedelta(hours=TICKET_FRESCURA_HORAS)
+    query = db.query(ReconciliationJob).filter(
+        ReconciliationJob.company_id == company_id,
+        ReconciliationJob.periodo.in_(periodos),
+        ReconciliationJob.tipo_libro == tipo_libro,
+        ReconciliationJob.num_ticket.isnot(None),
+        ReconciliationJob.created_at > limite,
+    )
+    if exclude_job_id is not None:
+        query = query.filter(ReconciliationJob.id != exclude_job_id)
+    encontrados: dict[str, str] = {}
+    # Ascendente: el último (id mayor) sobrescribe → gana el más reciente.
+    for job in query.order_by(ReconciliationJob.id.asc()).all():
+        encontrados[job.periodo] = job.num_ticket
+    return encontrados
+
+
 def _resolver_mapeo_guardado(db, company_id: int, tipo_libro: TipoLibro) -> dict | None:
     """
     Devuelve el mapeo guardado de la empresa como dict plano (o None). Se
@@ -220,6 +251,13 @@ async def _ejecutar_conciliacion(
             job.status = JobStatus.procesando
             db.commit()
 
+            # Al reanudar, el endpoint no re-pasa el formulario: recuperamos del
+            # propio job el mapeo y la cobertura que usó la conciliación original.
+            if mapeo_config is None and job.mapeo_config:
+                mapeo_config = job.mapeo_config
+            if cobertura_fechas is None and job.cobertura_fechas is not None:
+                cobertura_fechas = job.cobertura_fechas
+
             saved_mapping = (
                 _resolver_mapeo_guardado(db, company_id, tipo_libro)
                 if mapeo_config is None else None
@@ -227,6 +265,12 @@ async def _ejecutar_conciliacion(
 
             ruc = company.ruc
             empresa_nombre = company.nombre_razon_social
+            sin_sire = bool(job.sin_sire) and tipo_libro == TipoLibro.compras
+            # "Sin SIRE": tickets de meses anteriores que este job ya generó, y
+            # si el job sigue fresco para poder reaprovecharlos al reanudar.
+            extra_tickets_prev = dict(job.extra_tickets or {})
+            job_created = job.created_at if job.created_at.tzinfo else job.created_at.replace(tzinfo=timezone.utc)
+            job_es_fresco = datetime.now(timezone.utc) - job_created < timedelta(hours=TICKET_FRESCURA_HORAS)
             creds_snapshot = SimpleNamespace(
                 client_id=creds.client_id,
                 client_secret_enc=creds.client_secret_enc,
@@ -283,6 +327,88 @@ async def _ejecutar_conciliacion(
         # entera en la RAM del servidor. Devuelve la ruta al TXT temporal.
         sunat_tmp_path = await descargar(get_token, num_ticket, periodo)
 
+        # Fase 2a-bis: compras "sin SIRE". Un subproceso de sondeo lee las fechas
+        # de emisión del archivo y devuelve los meses anteriores (≤12) que hay
+        # que consultar. Para cada mes se resuelve el ticket en este orden:
+        #   1) reanudar: el ticket que este mismo job ya generó (si sigue fresco);
+        #   2) reutilizar (si el usuario lo pidió): un ticket fresco de otro job
+        #      de la empresa para ese mes — evita esperar la generación;
+        #   3) si no, se solicita uno nuevo a SUNAT.
+        # Los tickets se guardan en el job para reaprovecharlos al reanudar. Si
+        # la descarga de un mes falla, sus comprobantes se quedan en el A.
+        sunat_extra_paths: dict[str, str] = {}
+        extra_tickets: dict[str, str] = {}
+        meses_no_disponibles: list[str] = []
+        if sin_sire and tipo_libro == TipoLibro.compras:
+            sondeo_payload = {
+                "empresa_file_path": empresa_file_path,
+                "empresa_filename": empresa_filename,
+                "tipo_libro": tipo_libro.value,
+                "mapeo_config": mapeo_config,
+                "saved_mapping": saved_mapping,
+                "periodo": periodo,
+            }
+            loop = asyncio.get_running_loop()
+            with ProcessPoolExecutor(max_workers=1, mp_context=_MP_CONTEXT) as executor:
+                meses = await loop.run_in_executor(executor, extraer_periodos_emision, sondeo_payload)
+
+            # Candidatos de otros jobs para reutilizar (solo si el usuario lo pidió).
+            candidatos_reuso: dict[str, str] = {}
+            if reuse and meses:
+                db_reuso = SessionLocal()
+                try:
+                    candidatos_reuso = _buscar_tickets_frescos_multi(
+                        db_reuso, company_id, meses, tipo_libro, exclude_job_id=job_id,
+                    )
+                finally:
+                    db_reuso.close()
+
+            for mes in meses:
+                num_t = None
+                # 1) reanudar: reutiliza el ticket que este job ya generó
+                if resume and job_es_fresco and mes in extra_tickets_prev:
+                    consulta = await consultar_ticket_compras(get_token, extra_tickets_prev[mes], mes)
+                    if consulta is not None and "error" not in consulta[0].lower():
+                        num_t = extra_tickets_prev[mes]
+                # 2) reutilizar propuesta fresca de otro job (elección del usuario)
+                if num_t is None and mes in candidatos_reuso:
+                    consulta = await consultar_ticket_compras(get_token, candidatos_reuso[mes], mes)
+                    if consulta is not None and "terminado" in consulta[0].lower():
+                        num_t = candidatos_reuso[mes]
+                # 3) solicitar uno nuevo
+                if num_t is None:
+                    try:
+                        num_t = await solicitar_export_compras(get_token, mes)
+                    except Exception as exc:
+                        logger.warning(
+                            "Job #%s 'sin SIRE': no se pudo solicitar la propuesta del periodo %s "
+                            "(%s); sus comprobantes quedarán en el Escenario A", job_id, mes, exc,
+                        )
+                        continue
+                extra_tickets[mes] = num_t
+                try:
+                    sunat_extra_paths[mes] = await descargar_ticket_compras(get_token, num_t, mes)
+                except Exception as exc:
+                    logger.warning(
+                        "Job #%s 'sin SIRE': no se pudo descargar la propuesta del periodo %s "
+                        "(%s); sus comprobantes quedarán en el Escenario A", job_id, mes, exc,
+                    )
+
+            # Meses que se detectaron pero no se pudieron obtener de SUNAT: sus
+            # comprobantes quedan en A sin haberse verificado contra ese mes.
+            meses_no_disponibles = [m for m in meses if m not in sunat_extra_paths]
+
+            # Persiste los tickets extra en el job (sesión breve) para el reanudar.
+            if extra_tickets:
+                db_persist = SessionLocal()
+                try:
+                    j = db_persist.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
+                    if j is not None:
+                        j.extra_tickets = extra_tickets
+                        db_persist.commit()
+                finally:
+                    db_persist.close()
+
         # Fase 2b: parseo + conciliación + generación de reportes en un
         # SUBPROCESO. Todo el pico de RAM (millones de filas) vive ahí; cuando
         # el subproceso muere, el SO recupera el 100% de esa memoria — el
@@ -296,6 +422,9 @@ async def _ejecutar_conciliacion(
             "saved_mapping": saved_mapping,
             "cobertura_fechas": cobertura_fechas,
             "cobertura_desc": _descripcion_cobertura(cobertura_fechas),
+            "sin_sire": sin_sire,
+            "sunat_extra_paths": sunat_extra_paths,
+            "sunat_extra_fallidos": meses_no_disponibles,
             "ruc": ruc,
             "empresa_nombre": empresa_nombre,
             "periodo": periodo,
@@ -308,10 +437,11 @@ async def _ejecutar_conciliacion(
             with ProcessPoolExecutor(max_workers=1, mp_context=_MP_CONTEXT) as executor:
                 resultado = await loop.run_in_executor(executor, procesar_conciliacion, payload)
         finally:
-            try:
-                os.remove(sunat_tmp_path)
-            except OSError:
-                pass
+            for ruta in (sunat_tmp_path, *sunat_extra_paths.values()):
+                try:
+                    os.remove(ruta)
+                except OSError:
+                    pass
 
         if empresa_file_path_guardado:
             try:
@@ -388,6 +518,10 @@ async def run_reconciliation(
         None,
         description="JSON array de fechas AAAA-MM-DD que el archivo declara cubrir (solo ventas). Array vacío = mes completo.",
     ),
+    sin_sire: bool = Form(
+        False,
+        description="Solo compras: la empresa no está afiliada al SIRE. Los comprobantes emitidos en otro mes se buscan en la propuesta de su periodo.",
+    ),
     current_user: User = Depends(require_any_role),
     db: Session = Depends(get_db),
 ):
@@ -458,6 +592,12 @@ async def run_reconciliation(
         tipo_libro=tipo_libro,
         status=JobStatus.en_cola,
         empresa_filename=archivo.filename,
+        # Solo aplica a compras; en ventas la marca no tiene efecto.
+        sin_sire=bool(sin_sire) and tipo_libro == TipoLibro.compras,
+        # Foto del parseo/cobertura de ESTE job (solo para el reanudar; no es
+        # el formato general de la empresa).
+        mapeo_config=mapeo_config,
+        cobertura_fechas=cobertura,
     )
     db.add(job)
     db.commit()

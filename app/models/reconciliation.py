@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime, timezone
-from sqlalchemy import String, Enum, DateTime, ForeignKey, Integer, Text, Numeric, Boolean
+from sqlalchemy import String, Enum, DateTime, ForeignKey, Integer, Text, Numeric, Boolean, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -30,6 +30,20 @@ class ReconciliationJob(Base):
     empresa_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     num_ticket: Mapped[str | None] = mapped_column(String(30), nullable=True)
     propuesta_origen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Solo compras: la empresa no está afiliada al SIRE. Los comprobantes del
+    # Escenario A emitidos en otro mes se buscan en la propuesta de su periodo.
+    sin_sire: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Solo compras "sin SIRE": tickets SUNAT de las propuestas de meses
+    # anteriores que este job generó ({ "AAAAMM": "numTicket" }). Permite
+    # reaprovecharlos al reanudar en vez de volver a solicitarlos.
+    extra_tickets: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Foto interna del parseo de ESTE job (no es el formato general de la
+    # empresa): permite que el reanudar reconstruya el mismo mapeo aunque haya
+    # sido un formato custom que el usuario no guardó. None = auto-detección.
+    mapeo_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Solo ventas: fechas AAAA-MM-DD que el archivo declaró cubrir (lista vacía
+    # = mes completo). Se guarda para que el reanudar aplique el mismo filtro.
+    cobertura_fechas: Mapped[list | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
