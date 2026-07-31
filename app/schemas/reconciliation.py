@@ -43,6 +43,8 @@ class ReconciliationJobResponse(BaseModel):
     propuesta_origen_at: datetime | None = None
     result: ReconciliationResultResponse | None = None
     has_report: bool = False
+    has_csv_a: bool = False
     has_csv_b: bool = False
+    has_csv_c: bool = False
     has_csv_d: bool = False
     can_resume: bool = False

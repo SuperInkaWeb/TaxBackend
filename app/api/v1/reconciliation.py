@@ -64,14 +64,11 @@ def _check_job_access(job: ReconciliationJob, user: User) -> None:
 def _build_response(job: ReconciliationJob) -> ReconciliationJobResponse:
     resp = ReconciliationJobResponse.model_validate(job)
     resp.has_report = job.report_file is not None
-    resp.has_csv_b = (
-        job.report_file is not None
-        and job.report_file.csv_b_storage_path is not None
-    )
-    resp.has_csv_d = (
-        job.report_file is not None
-        and job.report_file.csv_d_storage_path is not None
-    )
+    rf = job.report_file
+    resp.has_csv_a = rf is not None and rf.csv_a_storage_path is not None
+    resp.has_csv_b = rf is not None and rf.csv_b_storage_path is not None
+    resp.has_csv_c = rf is not None and rf.csv_c_storage_path is not None
+    resp.has_csv_d = rf is not None and rf.csv_d_storage_path is not None
     resp.can_resume = (
         job.status == JobStatus.error
         and job.empresa_file_path is not None
@@ -467,8 +464,12 @@ async def _ejecutar_conciliacion(
                 filename=resultado["filename_xlsx"],
                 storage_path=resultado["path_xlsx"],
                 file_size_bytes=resultado["excel_size"],
+                csv_a_storage_path=resultado["path_csv_a"],
+                csv_a_file_size_bytes=resultado["csv_a_size"],
                 csv_b_storage_path=resultado["path_csv"],
                 csv_b_file_size_bytes=resultado["csv_b_size"],
+                csv_c_storage_path=resultado["path_csv_c"],
+                csv_c_file_size_bytes=resultado["csv_c_size"],
                 csv_d_storage_path=resultado["path_csv_d"],
                 csv_d_file_size_bytes=resultado["csv_d_size"],
             ))
@@ -827,6 +828,50 @@ def download_csv_d(
 
     filename = job.report_file.csv_d_storage_path.split("/")[-1]
     content = storage.read(job.report_file.csv_d_storage_path)
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{job_id}/download-csv-a")
+def download_csv_a(
+    job_id: int,
+    current_user: User = Depends(require_any_role),
+    db: Session = Depends(get_db),
+):
+    """Descarga el CSV completo del Escenario A (solo existe si A superó el máximo de Excel)."""
+    job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
+    if not job or not job.report_file or not job.report_file.csv_a_storage_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CSV Escenario A no disponible")
+
+    _check_job_access(job, current_user)
+
+    filename = job.report_file.csv_a_storage_path.split("/")[-1]
+    content = storage.read(job.report_file.csv_a_storage_path)
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{job_id}/download-csv-c")
+def download_csv_c(
+    job_id: int,
+    current_user: User = Depends(require_any_role),
+    db: Session = Depends(get_db),
+):
+    """Descarga el CSV completo del Escenario C (solo existe si C superó el máximo de Excel)."""
+    job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
+    if not job or not job.report_file or not job.report_file.csv_c_storage_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CSV Escenario C no disponible")
+
+    _check_job_access(job, current_user)
+
+    filename = job.report_file.csv_c_storage_path.split("/")[-1]
+    content = storage.read(job.report_file.csv_c_storage_path)
     return Response(
         content=content,
         media_type="text/csv; charset=utf-8",

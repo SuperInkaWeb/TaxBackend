@@ -18,7 +18,8 @@ from app.services.parser.mapeo import parse_con_columnas, validar_mapeo
 from app.services.parser.sunat_propuesta import parse_sunat_propuesta
 from app.services.reconciliation.engine import reconcile
 from app.services.report.excel_generator import (
-    generate_excel, generate_csv_b, generate_csv_d, EXCEL_B_LIMIT, EXCEL_D_LIMIT,
+    generate_excel, generate_csv_a, generate_csv_b, generate_csv_c, generate_csv_d,
+    EXCEL_MAX_DATA_ROWS,
 )
 from app.storage import storage
 
@@ -157,25 +158,23 @@ def procesar_conciliacion(payload: dict) -> dict:
     excel_size = len(excel_bytes)
     del excel_bytes
 
-    path_csv = None
-    csv_b_size = None
-    if len(recon_output.scenario_b) > EXCEL_B_LIMIT:
-        csv_b_bytes = generate_csv_b(recon_output, tipo_libro)
-        filename_csv = f"{ruc}_{periodo}_{tipo_libro}_B.csv"
-        path_csv = f"reportes/{company_id}/{job_id}/{filename_csv}"
-        storage.save(path_csv, csv_b_bytes)
-        csv_b_size = len(csv_b_bytes)
-        del csv_b_bytes
-
-    path_csv_d = None
-    csv_d_size = None
-    if len(recon_output.scenario_d) > EXCEL_D_LIMIT:
-        csv_d_bytes = generate_csv_d(recon_output, tipo_libro)
-        filename_csv_d = f"{ruc}_{periodo}_{tipo_libro}_D.csv"
-        path_csv_d = f"reportes/{company_id}/{job_id}/{filename_csv_d}"
-        storage.save(path_csv_d, csv_d_bytes)
-        csv_d_size = len(csv_d_bytes)
-        del csv_d_bytes
+    # Cada escenario que supera el máximo de filas de Excel se vuelca completo a
+    # un CSV descargable (los que caben en la hoja no generan CSV).
+    csv_out: dict[str, tuple] = {}
+    for etiqueta, escenario, gen in (
+        ("A", recon_output.scenario_a, generate_csv_a),
+        ("B", recon_output.scenario_b, generate_csv_b),
+        ("C", recon_output.scenario_c, generate_csv_c),
+        ("D", recon_output.scenario_d, generate_csv_d),
+    ):
+        if len(escenario) > EXCEL_MAX_DATA_ROWS:
+            data = gen(recon_output, tipo_libro)
+            ruta = f"reportes/{company_id}/{job_id}/{ruc}_{periodo}_{tipo_libro}_{etiqueta}.csv"
+            storage.save(ruta, data)
+            csv_out[etiqueta] = (ruta, len(data))
+            del data
+        else:
+            csv_out[etiqueta] = (None, None)
 
     return {
         "escenario_a_count": len(recon_output.scenario_a),
@@ -187,8 +186,8 @@ def procesar_conciliacion(payload: dict) -> dict:
         "filename_xlsx": filename_xlsx,
         "path_xlsx": path_xlsx,
         "excel_size": excel_size,
-        "path_csv": path_csv,
-        "csv_b_size": csv_b_size,
-        "path_csv_d": path_csv_d,
-        "csv_d_size": csv_d_size,
+        "path_csv_a": csv_out["A"][0], "csv_a_size": csv_out["A"][1],
+        "path_csv":   csv_out["B"][0], "csv_b_size": csv_out["B"][1],
+        "path_csv_c": csv_out["C"][0], "csv_c_size": csv_out["C"][1],
+        "path_csv_d": csv_out["D"][0], "csv_d_size": csv_out["D"][1],
     }

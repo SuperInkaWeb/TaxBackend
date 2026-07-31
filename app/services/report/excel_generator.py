@@ -36,8 +36,6 @@ def _fmt_periodo(p: str) -> str:
     return f"{p[:4]}-{p[4:]}" if p and len(p) == 6 else (p or "")
 
 EXCEL_FORMAT_LIMIT  = 50_000
-EXCEL_B_LIMIT       = 10_000
-EXCEL_D_LIMIT       = 10_000
 EXCEL_MAX_DATA_ROWS = 1_048_575
 
 
@@ -245,21 +243,15 @@ def generate_excel(
             f"Filas duplicadas en la propuesta SUNAT: {output.sunat_duplicados:,}",
             "Se usó la última aparición.",
         ))
-    if cnt_b > EXCEL_B_LIMIT:
-        notas.append((
-            f"La pestaña B muestra {EXCEL_B_LIMIT:,} de {cnt_b:,} registros",
-            "Ordenados por IGV descendente. El listado completo está en el CSV descargable.",
-        ))
-    if cnt_d > EXCEL_MAX_DATA_ROWS:
-        notas.append((
-            f"La pestaña D muestra {EXCEL_MAX_DATA_ROWS:,} de {cnt_d:,} registros",
-            "Excel no admite más filas por hoja. El listado completo está en el CSV del Escenario D.",
-        ))
-    elif cnt_d > EXCEL_D_LIMIT:
-        notas.append((
-            f"La pestaña D contiene el detalle completo ({cnt_d:,} comprobantes OK)",
-            "El mismo listado está disponible como CSV del Escenario D para análisis externo.",
-        ))
+    # Cada hoja muestra hasta el máximo de filas de Excel; si un escenario lo
+    # supera, se corta en la hoja y el listado completo va a un CSV descargable.
+    for etiqueta, cnt in (("A", cnt_a), ("B", cnt_b), ("C", cnt_c), ("D", cnt_d)):
+        if cnt > EXCEL_MAX_DATA_ROWS:
+            notas.append((
+                f"La pestaña {etiqueta} muestra {EXCEL_MAX_DATA_ROWS:,} de {cnt:,} registros",
+                "Excel no admite más filas por hoja. El listado completo está en el CSV "
+                f"descargable del Escenario {etiqueta}.",
+            ))
 
     if notas:
         r += 1
@@ -301,7 +293,7 @@ def generate_excel(
         ])
         col_alerta_a = 8
     use_fmt_a = cnt_a <= EXCEL_FORMAT_LIMIT
-    for row_idx, rec in enumerate(output.scenario_a, 2):
+    for row_idx, rec in enumerate(output.scenario_a[:EXCEL_MAX_DATA_ROWS], 2):
         if es_compras:
             values = [
                 rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
@@ -345,7 +337,7 @@ def generate_excel(
             "Base imponible", "IGV", "Importe total", "Alerta",
         ])
     recs_b_sorted = sorted(output.scenario_b, key=lambda x: (not x.es_alerta_roja, -x.igv_sunat))
-    recs_b = recs_b_sorted[:EXCEL_B_LIMIT]
+    recs_b = recs_b_sorted[:EXCEL_MAX_DATA_ROWS]
     use_fmt_b = len(recs_b) <= EXCEL_FORMAT_LIMIT
     col_alerta_b = 10 if es_compras else 8
 
@@ -443,7 +435,7 @@ def generate_excel(
         n_cols_c = 17
         num_cols_c = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 
-    for row_idx, rec in enumerate(output.scenario_c, 2):
+    for row_idx, rec in enumerate(output.scenario_c[:EXCEL_MAX_DATA_ROWS], 2):
         campos = rec.campos_diferentes
         campos_txt = ", ".join(CAMPO_LABELS[c] for c in CAMPO_ORDER if c in campos)
 
@@ -556,8 +548,39 @@ def generate_excel(
     return buf.getvalue()
 
 
+def generate_csv_a(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
+    """CSV completo del Escenario A — solo se genera si A supera el máximo de Excel."""
+    es_compras = tipo_libro == "compras"
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    if es_compras:
+        w.writerow([
+            "Tipo CDP", "Serie", "Numero", "Fecha Emision", "RUC Proveedor", "Proveedor",
+            "Base Imponible", "IGV", "Importe Total", "Alerta",
+        ])
+        for rec in output.scenario_a:
+            w.writerow([
+                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision,
+                rec.ruc_proveedor, rec.razon_social,
+                rec.base_imponible, rec.igv, rec.importe_total,
+                "ROJO" if rec.es_alerta_roja else "AMBAR",
+            ])
+    else:
+        w.writerow([
+            "Tipo CDP", "Serie", "Numero", "Fecha Emision", "Estado (tu archivo)",
+            "Base Imponible", "IGV", "Importe Total", "Alerta",
+        ])
+        for rec in output.scenario_a:
+            w.writerow([
+                rec.tipo_cdp, rec.serie, rec.numero, rec.fecha_emision, rec.status_description,
+                rec.base_imponible, rec.igv, rec.importe_total,
+                "ROJO" if rec.es_alerta_roja else "AMBAR",
+            ])
+    return buf.getvalue().encode("utf-8-sig")
+
+
 def generate_csv_b(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
-    """CSV completo del Escenario B — solo se genera cuando B supera EXCEL_B_LIMIT."""
+    """CSV completo del Escenario B — solo se genera si B supera el máximo de Excel."""
     es_compras = tipo_libro == "compras"
     buf = io.StringIO()
     w = csv.writer(buf)
@@ -587,8 +610,82 @@ def generate_csv_b(output: ReconciliationOutput, tipo_libro: str = "ventas") -> 
     return buf.getvalue().encode("utf-8-sig")
 
 
+def generate_csv_c(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
+    """CSV completo del Escenario C — solo se genera si C supera el máximo de Excel."""
+    es_compras = tipo_libro == "compras"
+    hay_hallazgo = es_compras and any(r.periodo_hallazgo for r in output.scenario_c)
+    labels = {
+        "fecha": "Fecha", "base_imponible": "Base imponible", "igv": "IGV",
+        "importe_total": "Importe total", "mto_exonerado": "Exonerado", "mto_inafecto": "Inafecto",
+        "bi_dgng": "BI DGNG", "igv_dgng": "IGV DGNG", "bi_dng": "BI DNG", "igv_dng": "IGV DNG",
+        "valor_adq_ng": "Adq. no gravadas", "moneda": "Moneda", "tipo_cambio": "Tipo de cambio",
+    }
+    orden = ["fecha", "base_imponible", "igv", "bi_dgng", "igv_dgng", "bi_dng", "igv_dng",
+             "valor_adq_ng", "importe_total", "moneda", "tipo_cambio",
+             "mto_exonerado", "mto_inafecto"]
+
+    def campos_txt(rec):
+        cs = rec.campos_diferentes
+        return ", ".join(labels[c] for c in orden if c in cs)
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    if es_compras:
+        header = [
+            "Tipo CDP", "Serie", "Numero", "RUC Proveedor", "Proveedor",
+            "Fecha (Empresa)", "Fecha (SUNAT)",
+            "BI DG (Empresa)", "BI DG (SUNAT)", "IGV DG (Empresa)", "IGV DG (SUNAT)",
+            "BI DGNG (Empresa)", "BI DGNG (SUNAT)", "IGV DGNG (Empresa)", "IGV DGNG (SUNAT)",
+            "BI DNG (Empresa)", "BI DNG (SUNAT)", "IGV DNG (Empresa)", "IGV DNG (SUNAT)",
+            "Adq. NG (Empresa)", "Adq. NG (SUNAT)", "Total (Empresa)", "Total (SUNAT)",
+            "Moneda (Empresa)", "Moneda (SUNAT)", "TC (Empresa)", "TC (SUNAT)",
+            "Campos con diferencia", "Alerta",
+        ]
+        if hay_hallazgo:
+            header.append("Hallado en periodo")
+        w.writerow(header)
+        for rec in output.scenario_c:
+            fila = [
+                rec.tipo_cdp, rec.serie, rec.numero, rec.ruc_proveedor, rec.razon_social,
+                rec.fecha_emision_empresa, rec.fecha_emision_sunat,
+                rec.base_imponible_empresa, rec.base_imponible_sunat,
+                rec.igv_empresa, rec.igv_sunat,
+                rec.bi_dgng_empresa, rec.bi_dgng_sunat, rec.igv_dgng_empresa, rec.igv_dgng_sunat,
+                rec.bi_dng_empresa, rec.bi_dng_sunat, rec.igv_dng_empresa, rec.igv_dng_sunat,
+                rec.valor_adq_ng_empresa, rec.valor_adq_ng_sunat,
+                rec.importe_total_empresa, rec.importe_total_sunat,
+                rec.moneda_empresa, rec.moneda_sunat,
+                rec.tipo_cambio_empresa, rec.tipo_cambio_sunat,
+                campos_txt(rec), "ROJO" if rec.es_alerta_roja else "AMBAR",
+            ]
+            if hay_hallazgo:
+                fila.append(_fmt_periodo(rec.periodo_hallazgo))
+            w.writerow(fila)
+    else:
+        w.writerow([
+            "Tipo CDP", "Serie", "Numero",
+            "Fecha (Empresa)", "Fecha (SUNAT)",
+            "Base Imponible (Empresa)", "Base Imponible (SUNAT)",
+            "IGV (Empresa)", "IGV (SUNAT)", "Importe Total (Empresa)", "Importe Total (SUNAT)",
+            "Exonerado (Empresa)", "Exonerado (SUNAT)", "Inafecto (Empresa)", "Inafecto (SUNAT)",
+            "Campos con diferencia", "Alerta",
+        ])
+        for rec in output.scenario_c:
+            w.writerow([
+                rec.tipo_cdp, rec.serie, rec.numero,
+                rec.fecha_emision_empresa, rec.fecha_emision_sunat,
+                rec.base_imponible_empresa, rec.base_imponible_sunat,
+                rec.igv_empresa, rec.igv_sunat,
+                rec.importe_total_empresa, rec.importe_total_sunat,
+                rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
+                rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
+                campos_txt(rec), "ROJO" if rec.es_alerta_roja else "AMBAR",
+            ])
+    return buf.getvalue().encode("utf-8-sig")
+
+
 def generate_csv_d(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
-    """CSV completo del Escenario D — solo se genera cuando D supera EXCEL_D_LIMIT."""
+    """CSV completo del Escenario D — solo se genera si D supera el máximo de Excel."""
     es_compras = tipo_libro == "compras"
     hay_hallazgo = es_compras and any(r.periodo_hallazgo for r in output.scenario_d)
     buf = io.StringIO()
