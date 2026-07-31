@@ -147,6 +147,39 @@ def _leer_df(content: bytes, delimiter: str, encoding: str, skip_rows: int = 0,
         return None
 
 
+_ISO_FECHA = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _detectar_fechas(content: bytes, delimiter: str, encoding: str,
+                     has_header: bool, idx_fecha: int) -> list[str]:
+    """
+    Devuelve las fechas AAAA-MM-DD distintas de la columna de fecha, leyendo
+    SOLO esa columna y en bloques: la memoria queda acotada sin importar el
+    tamaño del archivo (no se carga entero en el proceso padre).
+    """
+    text = content.decode(encoding, errors="replace")
+    fechas: set[str] = set()
+    try:
+        reader = pd.read_csv(
+            io.StringIO(text),
+            sep=re.escape(delimiter),
+            header=None,
+            usecols=[idx_fecha],
+            skiprows=1 if has_header else 0,
+            dtype=str,
+            skip_blank_lines=True,
+            on_bad_lines="skip",
+            engine="python",
+            chunksize=200_000,
+        )
+        for chunk in reader:
+            col = _norm_date_series(chunk.iloc[:, 0].fillna("").astype(str).str.strip())
+            fechas.update(f for f in col.unique().tolist() if _ISO_FECHA.match(f))
+    except Exception:
+        return sorted(fechas)
+    return sorted(fechas)
+
+
 _PLE141_A_CAMPO = {
     "fecha_emision":  _PLE141_IDX["fecha"],
     "tipo_cdp":       _PLE141_IDX["tipo"],
@@ -249,16 +282,7 @@ def analizar_archivo(content: bytes, tipo_libro: str, saved_config: dict | None 
     fechas_detectadas: list[str] = []
     idx_fecha = mapeo.get("fecha_emision")
     if tipo_libro == "ventas" and idx_fecha is not None:
-        df_full = _leer_df(content, delimiter, encoding)
-        if df_full is not None and not df_full.empty and idx_fecha < len(df_full.columns):
-            if has_header:
-                df_full = df_full.iloc[1:]
-            fechas = _norm_date_series(
-                df_full.iloc[:, idx_fecha].fillna("").astype(str).str.strip()
-            )
-            fechas_detectadas = sorted(
-                {f for f in fechas.unique().tolist() if re.match(r"^\d{4}-\d{2}-\d{2}$", f)}
-            )
+        fechas_detectadas = _detectar_fechas(content, delimiter, encoding, has_header, idx_fecha)
 
     return {
         "nivel": nivel,
@@ -318,11 +342,16 @@ def _sugerir(content: bytes, delimiter: str, encoding: str, has_header: bool,
     return mapeo, combinado
 
 
-def parse_con_columnas(content: bytes, config: dict, tipo_libro: str) -> list[EmpresaRecord]:
-    """Parsea el archivo completo con un mapeo confirmado (vectorizado)."""
+def parse_con_columnas(content: bytes, config: dict, tipo_libro: str,
+                       nrows: int | None = None) -> list[EmpresaRecord]:
+    """
+    Parsea el archivo con un mapeo confirmado (vectorizado).
+    nrows: si se pasa, lee solo esas filas (para validar sobre una muestra sin
+    cargar el archivo entero en memoria); None = archivo completo.
+    """
     df = _leer_df(
         content, config.get("delimiter", "|"), config.get("encoding") or _detect_encoding(content),
-        skip_rows=int(config.get("skip_rows", 0)),
+        skip_rows=int(config.get("skip_rows", 0)), nrows=nrows,
     )
     if df is None:
         return []
@@ -415,7 +444,7 @@ def validar_mapeo(content: bytes, config: dict, tipo_libro: str) -> dict:
 
     montos_ok = all(c in cols for c in ("base_imponible", "igv", "importe_total"))
     if not faltantes and montos_ok:
-        recs = parse_con_columnas(content, config, tipo_libro)[:2000]
+        recs = parse_con_columnas(content, config, tipo_libro, nrows=5000)[:2000]
         if recs:
             if tipo_libro == "compras":
                 aciertos = sum(
