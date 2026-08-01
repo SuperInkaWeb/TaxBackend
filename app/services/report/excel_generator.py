@@ -548,11 +548,10 @@ def generate_excel(
     return buf.getvalue()
 
 
-def generate_csv_a(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
+def generate_csv_a(output: ReconciliationOutput, tipo_libro: str, out) -> None:
     """CSV completo del Escenario A — solo se genera si A supera el máximo de Excel."""
     es_compras = tipo_libro == "compras"
-    buf = io.StringIO()
-    w = csv.writer(buf)
+    w = csv.writer(out)
     if es_compras:
         w.writerow([
             "Tipo CDP", "Serie", "Numero", "Fecha Emision", "RUC Proveedor", "Proveedor",
@@ -576,14 +575,12 @@ def generate_csv_a(output: ReconciliationOutput, tipo_libro: str = "ventas") -> 
                 rec.base_imponible, rec.igv, rec.importe_total,
                 "ROJO" if rec.es_alerta_roja else "AMBAR",
             ])
-    return buf.getvalue().encode("utf-8-sig")
 
 
-def generate_csv_b(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
+def generate_csv_b(output: ReconciliationOutput, tipo_libro: str, out) -> None:
     """CSV completo del Escenario B — solo se genera si B supera el máximo de Excel."""
     es_compras = tipo_libro == "compras"
-    buf = io.StringIO()
-    w = csv.writer(buf)
+    w = csv.writer(out)
     if es_compras:
         w.writerow([
             "Tipo CDP", "Serie", "Numero", "Fecha Emision SUNAT", "RUC Proveedor", "Proveedor",
@@ -607,10 +604,9 @@ def generate_csv_b(output: ReconciliationOutput, tipo_libro: str = "ventas") -> 
                 rec.base_imponible_sunat, rec.igv_sunat, rec.importe_total_sunat,
                 "ROJO" if rec.es_alerta_roja else "AMBAR",
             ])
-    return buf.getvalue().encode("utf-8-sig")
 
 
-def generate_csv_c(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
+def generate_csv_c(output: ReconciliationOutput, tipo_libro: str, out) -> None:
     """CSV completo del Escenario C — solo se genera si C supera el máximo de Excel."""
     es_compras = tipo_libro == "compras"
     hay_hallazgo = es_compras and any(r.periodo_hallazgo for r in output.scenario_c)
@@ -628,8 +624,7 @@ def generate_csv_c(output: ReconciliationOutput, tipo_libro: str = "ventas") -> 
         cs = rec.campos_diferentes
         return ", ".join(labels[c] for c in orden if c in cs)
 
-    buf = io.StringIO()
-    w = csv.writer(buf)
+    w = csv.writer(out)
     if es_compras:
         header = [
             "Tipo CDP", "Serie", "Numero", "RUC Proveedor", "Proveedor",
@@ -681,15 +676,13 @@ def generate_csv_c(output: ReconciliationOutput, tipo_libro: str = "ventas") -> 
                 rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
                 campos_txt(rec), "ROJO" if rec.es_alerta_roja else "AMBAR",
             ])
-    return buf.getvalue().encode("utf-8-sig")
 
 
-def generate_csv_d(output: ReconciliationOutput, tipo_libro: str = "ventas") -> bytes:
+def generate_csv_d(output: ReconciliationOutput, tipo_libro: str, out) -> None:
     """CSV completo del Escenario D — solo se genera si D supera el máximo de Excel."""
     es_compras = tipo_libro == "compras"
     hay_hallazgo = es_compras and any(r.periodo_hallazgo for r in output.scenario_d)
-    buf = io.StringIO()
-    w = csv.writer(buf)
+    w = csv.writer(out)
     if es_compras:
         header = [
             "Tipo CDP", "Serie", "Numero", "RUC Proveedor", "Proveedor",
@@ -736,4 +729,3 @@ def generate_csv_d(output: ReconciliationOutput, tipo_libro: str = "ventas") -> 
                 rec.mto_exonerado_empresa, rec.mto_exonerado_sunat,
                 rec.mto_inafecto_empresa, rec.mto_inafecto_sunat,
             ])
-    return buf.getvalue().encode("utf-8-sig")

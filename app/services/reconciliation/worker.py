@@ -11,6 +11,8 @@ el proceso principal, y devuelve un resumen liviano (conteos y rutas de salida)
 que el proceso principal guarda en la BD.
 """
 
+import io
+
 from app.services.parser.empresa_file import (
     parse_empresa_file, KNOWN_FORMAT_COLUMNS_HELP, PLE81_FORMAT_HELP,
 )
@@ -168,11 +170,15 @@ def procesar_conciliacion(payload: dict) -> dict:
         ("D", recon_output.scenario_d, generate_csv_d),
     ):
         if len(escenario) > EXCEL_MAX_DATA_ROWS:
-            data = gen(recon_output, tipo_libro)
             ruta = f"reportes/{company_id}/{job_id}/{ruc}_{periodo}_{tipo_libro}_{etiqueta}.csv"
-            storage.save(ruta, data)
-            csv_out[etiqueta] = (ruta, len(data))
-            del data
+            # Streaming a disco: se escribe fila por fila, sin armar el CSV
+            # entero (millones de filas) en RAM. Salida byte-idéntica a la previa.
+            with storage.open_write(ruta) as fb:
+                ft = io.TextIOWrapper(fb, encoding="utf-8-sig", newline="")
+                gen(recon_output, tipo_libro, ft)
+                ft.flush()
+                ft.detach()  # libera fb para que open_write lo cierre (fsync + fadvise)
+            csv_out[etiqueta] = (ruta, storage.size(ruta))
         else:
             csv_out[etiqueta] = (None, None)
 

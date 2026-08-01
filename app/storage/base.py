@@ -1,10 +1,24 @@
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 
 
 class BaseStorage(ABC):
     @abstractmethod
     def save(self, path: str, content: bytes) -> str:
         """Guarda el archivo y devuelve el storage_path."""
+
+    @abstractmethod
+    @contextmanager
+    def open_write(self, path: str):
+        """
+        Context manager que entrega un archivo binario para escribir en
+        streaming (reportes grandes sin cargarlos enteros en RAM).
+        Al cerrarse, el archivo queda persistido.
+        """
+
+    @abstractmethod
+    def size(self, storage_path: str) -> int:
+        """Tamaño en bytes del archivo, sin leerlo."""
 
     @abstractmethod
     def get_url(self, storage_path: str) -> str:

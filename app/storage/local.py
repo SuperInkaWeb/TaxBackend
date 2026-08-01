@@ -1,4 +1,5 @@
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from app.storage.base import BaseStorage
 from app.core.config import settings
@@ -36,6 +37,21 @@ class LocalStorage(BaseStorage):
             f.flush()
             _soltar_cache(f.fileno(), flush=True)
         return str(path)
+
+    @contextmanager
+    def open_write(self, path: str):
+        full_path = self.base_path / path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(full_path, "wb")
+        try:
+            yield f
+        finally:
+            f.flush()
+            _soltar_cache(f.fileno(), flush=True)
+            f.close()
+
+    def size(self, storage_path: str) -> int:
+        return (self.base_path / storage_path).stat().st_size
 
     def get_url(self, storage_path: str) -> str:
         return f"/api/v1/reconciliation/files/{storage_path}"
