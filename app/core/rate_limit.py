@@ -1,9 +1,11 @@
 """
-Limitador de intentos por ventana deslizante, en memoria.
+Limitador por ventana deslizante, en memoria. Genérico: cuenta eventos por
+clave y bloquea al superar N dentro de la ventana. Sirve para lockout de login
+(eventos = intentos fallidos) o para tasa de peticiones (eventos = envíos).
 
-Pensado para el login: bloquea tras N intentos fallidos dentro de la ventana.
 Vive en memoria de proceso — válido porque la app corre con un solo worker
-(misma restricción documentada que el caché del token SUNAT).
+(misma restricción documentada que el caché del token SUNAT). Para multi-worker
+habría que respaldarlo en Redis.
 """
 
 import time
@@ -33,7 +35,8 @@ class SlidingWindowLimiter:
             return 0
         return max(1, int(intentos[0] + self.window - now))
 
-    def register_failure(self, key: str) -> None:
+    def register(self, key: str) -> None:
+        """Registra un evento (intento fallido de login, envío de conciliación…)."""
         self._attempts[key].append(time.monotonic())
 
     def reset(self, key: str) -> None:

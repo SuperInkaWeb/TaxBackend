@@ -36,8 +36,8 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
 
     user = db.query(User).filter(User.email == payload.email).first()
     if not user or not verify_password(payload.password, user.password_hash):
-        _limite_por_email.register_failure(email_key)
-        _limite_por_ip.register_failure(ip)
+        _limite_por_email.register(email_key)
+        _limite_por_ip.register(ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales incorrectas")
     if user.status == UserStatus.inactivo:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta desactivada")

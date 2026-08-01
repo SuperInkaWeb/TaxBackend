@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session, joinedload
 from app.core.config import settings
 from app.core.database import get_db, SessionLocal
+from app.core.rate_limit import SlidingWindowLimiter
 from app.api.deps import require_any_role
 from app.models.user import User, UserRole
 from app.models.company import Company
@@ -79,6 +80,20 @@ def _build_response(job: ReconciliationJob) -> ReconciliationJobResponse:
 TICKET_FRESCURA_HORAS = 24
 
 _job_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_JOBS)
+
+# Cada conciliación dispara descargas costosas a SUNAT; se limita la tasa de
+# envíos por usuario para evitar abuso de recursos (OWASP: Insecure Design).
+_limite_conciliacion = SlidingWindowLimiter(max_attempts=10, window_seconds=60)
+
+
+def _chequear_limite_conciliacion(user_id: int) -> None:
+    espera = _limite_conciliacion.blocked_for(f"user:{user_id}")
+    if espera:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Demasiadas conciliaciones en poco tiempo. Espera {espera} segundo(s) e intenta de nuevo.",
+        )
+    _limite_conciliacion.register(f"user:{user_id}")
 
 
 def _descripcion_cobertura(fechas: list[str] | None) -> str | None:
@@ -526,6 +541,7 @@ async def run_reconciliation(
     current_user: User = Depends(require_any_role),
     db: Session = Depends(get_db),
 ):
+    _chequear_limite_conciliacion(current_user.id)
     try:
         ReconciliationCreate(periodo=periodo, tipo_libro=tipo_libro)
     except ValidationError as e:
@@ -639,6 +655,7 @@ async def resume_reconciliation(
     Reanuda un job fallido: si el ticket SUNAT guardado sigue vivo lo retoma
     (descarga directa si ya está Terminado); si murió, genera uno nuevo.
     """
+    _chequear_limite_conciliacion(current_user.id)
     job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job no encontrado")
