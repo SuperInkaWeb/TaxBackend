@@ -28,6 +28,7 @@ from app.services.sire.ventas import (
 )
 from app.models.file_mapping import CompanyFileMapping
 from app.services.reconciliation.worker import procesar_conciliacion, extraer_periodos_emision
+from app.core.mem import rss_mb
 from app.storage import storage
 
 # Los subprocesos se crean con "spawn" (no "fork"): fork dentro de un servidor
@@ -201,10 +202,13 @@ async def _run_reconciliation_task(*args, **kwargs) -> None:
     recupere la memoria (hacerlo dentro de la tarea no liberaría nada, porque
     sus variables locales seguirían vivas).
     """
+    job_id = args[0] if args else kwargs.get("job_id")
     try:
         await _ejecutar_conciliacion(*args, **kwargs)
     finally:
+        logger.info("[mem] job #%s RSS antes de liberar=%s MB", job_id, rss_mb())
         _liberar_memoria()
+        logger.info("[mem] job #%s RSS tras liberar=%s MB", job_id, rss_mb())
 
 
 async def _ejecutar_conciliacion(
@@ -232,6 +236,7 @@ async def _ejecutar_conciliacion(
     RAM: así N conciliaciones simultáneas no revientan el servidor.
     """
     await _job_semaphore.acquire()
+    logger.info("[mem] job #%s RSS inicio=%s MB", job_id, rss_mb())
     try:
         # Fase 1: trabajo breve con la BD (leer, marcar 'procesando', pedir el
         # ticket a SUNAT). Se extraen a variables planas los datos que se usan
@@ -323,6 +328,7 @@ async def _ejecutar_conciliacion(
         # minutos). Se baja en streaming a disco: la propuesta NUNCA se carga
         # entera en la RAM del servidor. Devuelve la ruta al TXT temporal.
         sunat_tmp_path = await descargar(get_token, num_ticket, periodo)
+        logger.info("[mem] job #%s RSS tras descargar propuesta=%s MB", job_id, rss_mb())
 
         # Fase 2a-bis: compras "sin SIRE". Un subproceso de sondeo lee las fechas
         # de emisión del archivo y devuelve los meses anteriores (≤12) que hay
@@ -439,6 +445,7 @@ async def _ejecutar_conciliacion(
                     os.remove(ruta)
                 except OSError:
                     pass
+        logger.info("[mem] job #%s RSS tras subproceso (murio)=%s MB", job_id, rss_mb())
 
         if empresa_file_path_guardado:
             try:
