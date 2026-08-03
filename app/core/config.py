@@ -8,10 +8,6 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "SIRE Bot"
     APP_ENV: Literal["development", "production"] = "development"
-    SECRET_KEY: str
-    ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    REFRESH_TOKEN_EXPIRE_HOURS: int = 8
 
     MAX_CONCURRENT_JOBS: int = 3
 
@@ -43,11 +39,6 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.APP_ENV == "development"
-
-    @computed_field
-    @property
-    def auth0_enabled(self) -> bool:
-        return bool(self.AUTH0_DOMAIN and self.AUTH0_AUDIENCE)
 
 
 settings = Settings()

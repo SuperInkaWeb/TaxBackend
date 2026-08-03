@@ -2,9 +2,7 @@ import secrets
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from app.core.config import settings
 from app.core.database import get_db
-from app.core.security import hash_password
 from app.api.deps import require_admin_or_above
 from app.models.access_request import AccessRequest, AccessRequestStatus
 from app.models.company import Company
@@ -59,7 +57,6 @@ def review_access_request(
     req.reviewed_at = datetime.now(timezone.utc)
     req.rejection_reason = payload.rejection_reason
 
-    temp_password: str | None = None
     if payload.status == AccessRequestStatus.aprobado:
         if db.query(Company).filter(Company.ruc == req.ruc).first():
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="RUC ya registrado en el sistema")
@@ -68,22 +65,19 @@ def review_access_request(
         db.add(company)
         db.flush()
 
-        temp_password = secrets.token_urlsafe(9)
-        auth0_sub = None
-        if settings.auth0_enabled:
-            from app.core.auth0 import crear_usuario, enviar_reset_password, Auth0Error
+        from app.core.auth0 import crear_usuario, enviar_reset_password, Auth0Error
 
-            try:
-                auth0_sub = crear_usuario(req.email, req.nombre, temp_password + "A1!")
-                enviar_reset_password(req.email)
-            except Auth0Error as e:
-                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
-            temp_password = None
+        # Usuario creado en Auth0 (identidad y contraseña las gestiona Auth0, que
+        # envía el email para establecerla); el registro local guarda el vínculo.
+        try:
+            auth0_sub = crear_usuario(req.email, req.nombre, secrets.token_urlsafe(12) + "A1!")
+            enviar_reset_password(req.email)
+        except Auth0Error as e:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 
         user = User(
             email=req.email,
             nombre=req.nombre,
-            password_hash=hash_password(secrets.token_urlsafe(16)) if auth0_sub else hash_password(temp_password),
             auth0_sub=auth0_sub,
             role=UserRole.empresa,
             company_id=company.id,
@@ -93,6 +87,4 @@ def review_access_request(
 
     db.commit()
     db.refresh(req)
-    resp = AccessRequestResponse.model_validate(req)
-    resp.temp_password = temp_password
-    return resp
+    return AccessRequestResponse.model_validate(req)

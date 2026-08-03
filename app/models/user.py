@@ -24,7 +24,9 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     nombre: Mapped[str] = mapped_column(String(150), nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Vestigial: la autenticación es 100% Auth0. Se conserva nullable por
+    # compatibilidad de datos; se dropeará en una migración posterior.
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     auth0_sub: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True, index=True)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), nullable=False)
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), default=UserStatus.activo, nullable=False)

@@ -6,7 +6,9 @@ Integración con Auth0.
   (aprobación de solicitudes, creación de usuarios por la empresa).
 - Envío del email de restablecimiento de contraseña.
 
-Todo se activa solo cuando settings.auth0_enabled (AUTH0_DOMAIN + AUDIENCE).
+Auth0 es el único proveedor de identidad del sistema. Requiere AUTH0_DOMAIN y
+AUTH0_AUDIENCE configurados (y las credenciales del Management API para crear
+usuarios).
 """
 
 import time

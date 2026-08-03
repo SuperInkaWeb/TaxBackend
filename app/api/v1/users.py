@@ -2,12 +2,10 @@ import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from app.core.config import settings
 from app.core.database import get_db
-from app.core.security import hash_password, verify_password
 from app.api.deps import get_current_user, require_superadmin, require_empresa_or_above
 from app.models.user import User, UserRole, UserStatus
-from app.schemas.user import UserCreate, UserUpdate, UserResponse, UserChangePassword
+from app.schemas.user import UserCreate, UserUpdate, UserResponse
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -18,21 +16,12 @@ def get_me(current_user: User = Depends(get_current_user)):
 
 
 @router.put("/me/password")
-def change_my_password(
-    payload: UserChangePassword,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    if settings.auth0_enabled:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="La contraseña se gestiona en Auth0 (usa '¿Olvidaste tu contraseña?' en el login).",
-        )
-    if not verify_password(payload.current_password, current_user.password_hash):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Contraseña actual incorrecta")
-    current_user.password_hash = hash_password(payload.new_password)
-    db.commit()
-    return {"detail": "Contraseña actualizada"}
+def change_my_password(current_user: User = Depends(get_current_user)):
+    """La contraseña la gestiona Auth0; se guía al usuario al flujo correcto."""
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="La contraseña se gestiona en Auth0 (usa '¿Olvidaste tu contraseña?' en el login).",
+    )
 
 
 @router.get("/", response_model=list[UserResponse])
@@ -90,28 +79,19 @@ def create_user(
     if db.query(User).filter(User.email == payload.email).first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El email ya está registrado")
 
-    auth0_sub = None
-    if settings.auth0_enabled:
-        from app.core.auth0 import crear_usuario, enviar_reset_password, Auth0Error
+    from app.core.auth0 import crear_usuario, enviar_reset_password, Auth0Error
 
-        password = secrets.token_urlsafe(12) + "A1!"
-        try:
-            auth0_sub = crear_usuario(payload_dict["email"], payload_dict["nombre"], password)
-            enviar_reset_password(payload_dict["email"])
-        except Auth0Error as e:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
-    else:
-        if not payload_dict.get("password"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="La contraseña es obligatoria",
-            )
-        password = payload_dict["password"]
+    # Se crea en Auth0 con una contraseña temporal y se le envía el email para
+    # establecerla; el registro local solo guarda el vínculo (auth0_sub).
+    try:
+        auth0_sub = crear_usuario(payload_dict["email"], payload_dict["nombre"], secrets.token_urlsafe(12) + "A1!")
+        enviar_reset_password(payload_dict["email"])
+    except Auth0Error as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 
     user = User(
         email=payload_dict["email"],
         nombre=payload_dict["nombre"],
-        password_hash=hash_password(password),
         auth0_sub=auth0_sub,
         role=payload_dict["role"],
         company_id=payload_dict.get("company_id"),
@@ -181,7 +161,7 @@ def delete_user(
             detail=f"El usuario tiene {tickets} ticket(s) de soporte. Desactívalo en su lugar.",
         )
 
-    if settings.auth0_enabled and user.auth0_sub:
+    if user.auth0_sub:
         from app.core.auth0 import eliminar_usuario, Auth0Error
 
         try:
