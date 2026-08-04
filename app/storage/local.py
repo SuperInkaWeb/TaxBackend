@@ -65,9 +65,6 @@ class LocalStorage(BaseStorage):
     def size(self, storage_path: str) -> int:
         return self._ruta_segura(storage_path).stat().st_size
 
-    def get_url(self, storage_path: str) -> str:
-        return f"/api/v1/reconciliation/files/{storage_path}"
-
     def read(self, storage_path: str) -> bytes:
         with open(self._ruta_segura(storage_path), "rb") as f:
             data = f.read()

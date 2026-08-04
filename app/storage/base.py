@@ -21,10 +21,6 @@ class BaseStorage(ABC):
         """Tamaño en bytes del archivo, sin leerlo."""
 
     @abstractmethod
-    def get_url(self, storage_path: str) -> str:
-        """Devuelve una URL de descarga para el archivo."""
-
-    @abstractmethod
     def read(self, storage_path: str) -> bytes:
         """Lee y devuelve el contenido del archivo."""
 
