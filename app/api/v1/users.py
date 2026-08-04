@@ -15,15 +15,6 @@ def get_me(current_user: User = Depends(get_current_user)):
     return current_user
 
 
-@router.put("/me/password")
-def change_my_password(current_user: User = Depends(get_current_user)):
-    """La contraseña la gestiona Auth0; se guía al usuario al flujo correcto."""
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="La contraseña se gestiona en Auth0 (usa '¿Olvidaste tu contraseña?' en el login).",
-    )
-
-
 @router.get("/", response_model=list[UserResponse])
 def list_users(
     company_id: int | None = None,
